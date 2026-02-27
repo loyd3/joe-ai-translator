@@ -52,8 +52,13 @@ cd joe-ai-translator
 cp .env.example .env
 # 编辑 .env，配置你的 AI API Key 和 MySQL 密码
 
-# 初始化数据库
+# 初始化数据库 (方式1: 自动)
 python init_db.py
+
+# 或者使用 SQL 文件 (方式2: 需要 mysql 客户端)
+python init_db.py --sql
+# 或者直接执行 SQL
+mysql -u root -p < init.sql
 
 # 一键启动
 python start.py
@@ -75,6 +80,7 @@ docker-compose up -d
 joe-ai-translator/
 ├── start.py              # 一键启动脚本
 ├── init_db.py            # 数据库初始化脚本
+├── init.sql              # 数据库初始化 SQL 文件
 ├── .env.example          # 环境变量模板
 ├── backend/              # FastAPI 后端
 │   ├── app/
@@ -111,13 +117,37 @@ DB_POOL_RECYCLE=3600    # 连接回收时间（秒）
 
 #### 创建数据库
 
+**方式1: 使用 SQL 文件 (推荐)**
+
+```bash
+# 方法 A: 使用 init_db.py 脚本
+python init_db.py --sql
+
+# 方法 B: 直接执行 SQL 文件
+mysql -u root -p < init.sql
+```
+
+**方式2: 手动创建**
+
 ```bash
 # 登录 MySQL
 mysql -u root -p
 
 # 创建数据库
 CREATE DATABASE aitranslator CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+# 使用数据库并创建表
+USE aitranslator;
+SOURCE init.sql;
 ```
+
+#### 数据库表结构
+
+| 表名 | 说明 | 主要字段 |
+|------|------|----------|
+| `translation_history` | 翻译历史记录 | source_text, translated_text, source_lang, target_lang, is_favorite |
+| `batch_translations` | 批量翻译任务 | items(JSON), total_items, completed_items, status |
+| `system_settings` | 系统配置 | setting_key, setting_value |
 
 ### 环境变量
 

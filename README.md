@@ -45,8 +45,8 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/loyd3/ai-translator.git
-cd ai-translator
+git clone https://github.com/loyd3/joe-ai-translator.git
+cd joe-ai-translator
 
 # 配置环境变量
 cp .env.example .env
@@ -72,7 +72,7 @@ docker-compose up -d
 ## 📁 项目结构
 
 ```
-ai-translator/
+joe-ai-translator/
 ├── start.py              # 一键启动脚本
 ├── init_db.py            # 数据库初始化脚本
 ├── .env.example          # 环境变量模板

@@ -36,8 +36,35 @@ def run_command(cmd, cwd=None, env=None):
         preexec_fn=os.setsid if sys.platform != "win32" else None
     )
 
+def check_mysql():
+    """检查 MySQL 是否运行"""
+    try:
+        result = subprocess.run(
+            "mysql -e \"SELECT 1;\" 2>/dev/null",
+            shell=True,
+            capture_output=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except:
+        return False
+
+def create_database():
+    """创建 aitranslator 数据库"""
+    try:
+        result = subprocess.run(
+            "mysql -e \"CREATE DATABASE IF NOT EXISTS aitranslator CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\"",
+            shell=True,
+            capture_output=True,
+            timeout=10
+        )
+        return result.returncode == 0
+    except Exception as e:
+        print(f"{YELLOW}⚠️  无法自动创建数据库: {e}{RESET}")
+        return False
+
 def main():
-    print_header("🌐 AI Translator 启动脚本")
+    print_header("🌐 Joe AI Translator 启动脚本")
     
     # 获取项目根目录
     root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -60,27 +87,44 @@ def main():
             print(f"{RED}❌ 未找到 Node.js，请安装 Node.js 20+{RESET}")
             sys.exit(1)
         
+        print(f"{GREEN}✅ 环境检查通过{RESET}")
+        
+        # 检查 MySQL
+        print(f"\n{YELLOW}🗄️  检查 MySQL 连接...{RESET}")
+        if check_mysql():
+            print(f"{GREEN}✅ MySQL 服务运行中{RESET}")
+            if create_database():
+                print(f"{GREEN}✅ 数据库 'aitranslator' 已就绪{RESET}")
+            else:
+                print(f"{YELLOW}⚠️  请手动创建数据库: CREATE DATABASE aitranslator;{RESET}")
+        else:
+            print(f"{YELLOW}⚠️  无法连接到 MySQL，请确保:{RESET}")
+            print(f"   1. MySQL 服务已启动")
+            print(f"   2. 用户名/密码配置正确 (检查 .env 文件)")
+        
         # 检查 .env 文件
         env_file = os.path.join(root_dir, ".env")
         if not os.path.exists(env_file):
-            print(f"{YELLOW}⚠️  .env 文件不存在，正在从模板创建...{RESET}")
+            print(f"\n{YELLOW}⚠️  .env 文件不存在，正在从模板创建...{RESET}")
             if os.path.exists(os.path.join(root_dir, ".env.example")):
                 with open(os.path.join(root_dir, ".env.example")) as f:
                     content = f.read()
                 with open(env_file, "w") as f:
                     f.write(content)
-                print(f"{GREEN}✅ 已创建 .env 文件，请编辑配置你的 API Key{RESET}")
+                print(f"{GREEN}✅ 已创建 .env 文件，请编辑配置你的 API Key 和数据库密码{RESET}")
             else:
                 print(f"{RED}❌ 找不到 .env.example 文件{RESET}")
                 sys.exit(1)
         
-        # 初始化数据库
-        print(f"\n{YELLOW}🗄️  初始化数据库...{RESET}")
+        # 初始化数据库表
+        print(f"\n{YELLOW}🗄️  初始化数据库表...{RESET}")
         result = subprocess.run([python_cmd, "init_db.py"], cwd=root_dir, capture_output=True, text=True)
         if result.returncode == 0:
-            print(f"{GREEN}✅ 数据库初始化完成{RESET}")
+            print(f"{GREEN}✅ 数据库表初始化完成{RESET}")
         else:
-            print(f"{RED}❌ 数据库初始化失败: {result.stderr}{RESET}")
+            print(f"{RED}❌ 数据库初始化失败:{RESET}")
+            print(result.stderr)
+            print(f"\n{YELLOW}请检查 MySQL 配置是否正确{RESET}")
         
         # 安装后端依赖
         print(f"\n{YELLOW}📦 检查后端依赖...{RESET}")
@@ -119,7 +163,7 @@ def main():
         print(f"  {BLUE}前端: http://localhost:5173{RESET}")
         
         print(f"\n{GREEN}{'='*60}{RESET}")
-        print(f"{GREEN}  ✅ AI Translator 已启动！{RESET}")
+        print(f"{GREEN}  ✅ Joe AI Translator 已启动！{RESET}")
         print(f"{GREEN}{'='*60}{RESET}")
         print(f"\n访问 {YELLOW}http://localhost:5173{RESET} 开始使用")
         print(f"\n按 Ctrl+C 停止服务\n")

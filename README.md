@@ -38,7 +38,7 @@
 
 ### 前置要求
 
-1. **MySQL 数据库**（或 SQLite 用于测试）
+1. **MySQL 数据库**（数据库名: `aitranslator`）
 2. **Node.js** (v20+) 和 **Python** (v3.11+)
 
 ### 一键启动
@@ -50,7 +50,7 @@ cd joe-ai-translator
 
 # 配置环境变量
 cp .env.example .env
-# 编辑 .env，配置你的 AI API Key
+# 编辑 .env，配置你的 AI API Key 和 MySQL 密码
 
 # 初始化数据库
 python init_db.py
@@ -95,13 +95,37 @@ joe-ai-translator/
 
 ## 🔧 配置说明
 
+### MySQL 数据库配置
+
+项目默认使用 MySQL，数据库名为 `aitranslator`。
+
+```bash
+# MySQL 配置示例
+DATABASE_URL=mysql+pymysql://root:password@localhost:3306/aitranslator?charset=utf8mb4
+
+# 连接池配置
+DB_POOL_SIZE=5          # 连接池大小
+DB_MAX_OVERFLOW=10      # 最大溢出连接
+DB_POOL_RECYCLE=3600    # 连接回收时间（秒）
+```
+
+#### 创建数据库
+
+```bash
+# 登录 MySQL
+mysql -u root -p
+
+# 创建数据库
+CREATE DATABASE aitranslator CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
 ### 环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `AI_PROVIDER` | AI 提供商 | `deepseek` |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key | - |
-| `DATABASE_URL` | 数据库连接 | SQLite |
+| `DATABASE_URL` | MySQL 连接字符串 | `mysql+pymysql://root:password@localhost:3306/aitranslator?charset=utf8mb4` |
 
 ---
 

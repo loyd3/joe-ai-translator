@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     ai_provider: str = "deepseek"
     ai_temperature: float = 0.3
     ai_max_tokens: int = 4096
-    database_url: Optional[str] = None
+    database_url: str = "mysql+pymysql://root:password@localhost:3306/aitranslator?charset=utf8mb4"
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_recycle: int = 3600
     
     # DeepSeek
     deepseek_api_key: Optional[str] = None

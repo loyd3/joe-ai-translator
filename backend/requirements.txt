@@ -1,8 +1,10 @@
 fastapi==0.109.2
 uvicorn==0.27.1
-sqlalchemy==2.0.27
-pydantic==2.6.1
-pydantic-settings==2.1.0
+# 2.0.28+ 修复 Python 3.13 TypingOnly 与 __static_attributes__ 的兼容性
+sqlalchemy>=2.0.28,<3
+# 使用 2.11+ 以获取 Python 3.13 Windows 预编译 wheel，避免本地编译 MSVC
+pydantic>=2.11.0,<3
+pydantic-settings>=2.6.0
 python-multipart==0.0.9
 httpx==0.26.0
 openai==1.12.0

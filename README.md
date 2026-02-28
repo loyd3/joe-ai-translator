@@ -106,14 +106,18 @@ joe-ai-translator/
 项目默认使用 MySQL，数据库名为 `aitranslator`。
 
 ```bash
-# MySQL 配置示例
-DATABASE_URL=mysql+pymysql://root:password@localhost:3306/aitranslator?charset=utf8mb4
+# MySQL 配置示例（请把 password 改成你的 MySQL root 密码）
+DATABASE_URL=mysql+pymysql://root:你的密码@localhost:3306/aitranslator?charset=utf8mb4
 
 # 连接池配置
 DB_POOL_SIZE=5          # 连接池大小
 DB_MAX_OVERFLOW=10      # 最大溢出连接
 DB_POOL_RECYCLE=3600    # 连接回收时间（秒）
 ```
+
+若出现 **Access denied for user 'root'@'localhost' (using password: YES)**：
+- 在项目根目录或 `backend/` 下的 `.env` 中，将 `DATABASE_URL` 里的密码改为你本机 MySQL root 的密码。
+- 确认 MySQL 服务已启动，且该用户有权限访问 `aitranslator` 数据库。
 
 #### 创建数据库
 

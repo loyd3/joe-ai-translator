@@ -121,9 +121,12 @@ export const literaryApi = {
   getTranslation: (id: number, includeParagraphs?: boolean) => 
     api.get(`/literary/translations/${id}`, { params: { include_paragraphs: includeParagraphs } }),
   
-  // 更新翻译任务
-  updateTranslation: (id: number, data: { title?: string; final_translation?: string }) => 
-    api.put(`/literary/translations/${id}`, data),
+  // 更新翻译任务（改）
+  updateTranslation: (id: number, data: {
+    title?: string
+    final_translation?: string
+    status?: string
+  }) => api.put(`/literary/translations/${id}`, data),
   
   // 删除翻译任务
   deleteTranslation: (id: number) => api.delete(`/literary/translations/${id}`),
@@ -214,6 +217,11 @@ export const literaryApi = {
 
   // ===== 长文件翻译 =====
 
+  // 解析上传文件为正文（不创建任务，用于新建任务时填充原文）
+  parseFile: (formData: FormData) =>
+    api.post<{ text: string; filename: string }>('/literary/parse-file', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    }),
   // 上传文件创建翻译任务
   uploadAndTranslate: (formData: FormData) =>
     api.post('/literary/translations/upload', formData, {

@@ -115,7 +115,7 @@
                 action="#"
                 :auto-upload="false"
                 :on-change="handleFileChange"
-                accept=".txt,.md"
+                accept=".txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg"
                 :limit="1"
               >
                 <el-icon class="el-icon--upload"><Upload /></el-icon>
@@ -124,7 +124,7 @@
                 </div>
                 <template #tip>
                   <div class="el-upload__tip">
-                    支持 .txt, .md 格式文件
+                    支持 txt、docx、pdf、mobi 及 md/html/xml/json/csv 等
                   </div>
                 </template>
               </el-upload>
@@ -210,16 +210,31 @@ const loadDocuments = async () => {
   }
 }
 
-const handleFileChange = (file: any) => {
+const binaryExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw'])
+const handleFileChange = async (file: any) => {
+  const raw = file?.raw
+  if (!raw) return
+  const ext = (file.name || '').split('.').pop()?.toLowerCase()
+  if (binaryExtensions.has(ext)) {
+    try {
+      const formData = new FormData()
+      formData.append('file', raw)
+      const res = await literaryApi.parseFile(formData)
+      form.value.content = res.data?.text ?? ''
+      if (!form.value.name) form.value.name = (file.name || '').replace(/\.[^.]+$/, '')
+      ElMessage.success('文件已解析')
+    } catch (e) {
+      ElMessage.error('文件解析失败')
+    }
+    return
+  }
   const reader = new FileReader()
   reader.onload = (e) => {
     form.value.content = e.target?.result as string
-    if (!form.value.name) {
-      form.value.name = file.name.replace(/\.[^/.]+$/, '')
-    }
+    if (!form.value.name) form.value.name = file.name.replace(/\.[^/.]+$/, '')
     ElMessage.success('文件已读取')
   }
-  reader.readAsText(file.raw)
+  reader.readAsText(raw, 'UTF-8')
 }
 
 const createDoc = async () => {

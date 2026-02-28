@@ -10,6 +10,9 @@ import json
 import os
 import io
 import asyncio
+import re
+import tempfile
+import shutil
 from app.database import get_db
 from app.schemas.schemas import (
     LiteraryTranslationCreate, LiteraryTranslationResponse,
@@ -139,11 +142,15 @@ async def upload_reference_document(
     description: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    """上传参考文档文件"""
-    # 读取文件内容
+    """上传参考文档文件，支持多种文本格式（与文学翻译上传一致）"""
     content = await file.read()
-    text_content = content.decode('utf-8')
-    
+    ext = file.filename.split('.')[-1].lower() if '.' in file.filename else 'txt'
+    if ext not in SUPPORTED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
+    try:
+        text_content = parse_text_file(content, ext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     doc = ReferenceDocument(
         name=file.filename,
         file_type=file.filename.split('.')[-1] if '.' in file.filename else 'txt',
@@ -291,7 +298,12 @@ async def update_literary_translation(
         translation.title = request.title
     if request.final_translation is not None:
         translation.final_translation = request.final_translation
-    
+    if request.status is not None:
+        allowed = ("pending", "translating", "verifying", "revising", "finalizing", "completed", "failed")
+        if request.status not in allowed:
+            raise HTTPException(status_code=400, detail=f"status must be one of: {allowed}")
+        translation.status = request.status
+
     db.commit()
     db.refresh(translation)
     return translation
@@ -1290,18 +1302,88 @@ async def auto_extract_terms_after_finalize(
 # 长文件一键翻译
 # ============================================================
 
-def parse_text_file(content: bytes, file_type: str) -> str:
-    """解析文本文件内容"""
+# 支持的上传格式：txt、docx、pdf、mobi 及常见文本格式
+SUPPORTED_UPLOAD_EXTENSIONS = {
+    'txt', 'md', 'markdown', 'text',
+    'docx', 'doc',   # Word
+    'pdf',
+    'mobi', 'azw',   # 电子书
+    'html', 'htm', 'xhtml', 'xml', 'json', 'csv',
+    'log', 'rst', 'tex', 'srt', 'sub', 'vtt', 'yaml', 'yml', 'ini', 'cfg', 'properties',
+}
+
+
+def _decode_text_content(content: bytes) -> str:
+    """多种编码尝试解码"""
+    for encoding in ('utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin-1'):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode('utf-8', errors='ignore')
+
+
+def _extract_text_docx(content: bytes) -> str:
+    """从 Word docx 提取正文"""
+    from docx import Document
+    doc = Document(io.BytesIO(content))
+    return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+
+def _extract_text_pdf(content: bytes) -> str:
+    """从 PDF 提取正文"""
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(content))
+    parts = []
+    for page in reader.pages:
+        t = page.extract_text()
+        if t:
+            parts.append(t)
+    return "\n\n".join(parts)
+
+
+def _extract_text_mobi(content: bytes) -> str:
+    """从 MOBI/AZW 电子书提取正文。解压后可能是 HTML/EPUB/PDF，按类型处理"""
+    import mobi
+    fd, path = tempfile.mkstemp(suffix=".mobi")
     try:
-        if file_type in ['txt', 'md']:
-            return content.decode('utf-8')
-        elif file_type == 'docx':
-            # 简化处理，实际应该使用 python-docx
-            return content.decode('utf-8', errors='ignore')
-        else:
-            return content.decode('utf-8', errors='ignore')
+        os.write(fd, content)
+        os.close(fd)
+        tempdir, filepath = mobi.extract(path)
+        try:
+            ext = filepath.split(".")[-1].lower() if "." in filepath else ""
+            if ext == "pdf":
+                with open(filepath, "rb") as f:
+                    return _extract_text_pdf(f.read())
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                raw = f.read()
+            text = re.sub(r"<[^>]+>", " ", raw)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+        finally:
+            shutil.rmtree(tempdir, ignore_errors=True)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def parse_text_file(content: bytes, file_type: str) -> str:
+    """根据扩展名解析文件内容为纯文本。支持 txt、docx、pdf、mobi 等"""
+    ext = (file_type or "").lower()
+    try:
+        if ext in ("docx", "doc"):
+            return _extract_text_docx(content)
+        if ext == "pdf":
+            return _extract_text_pdf(content)
+        if ext in ("mobi", "azw"):
+            return _extract_text_mobi(content)
+        # 文本类：多编码解码
+        text = _decode_text_content(content)
+        return text
     except Exception as e:
-        raise ValueError(f"无法解析文件: {str(e)}")
+        raise ValueError(f"无法解析文件 ({ext}): {str(e)}")
 
 
 def split_long_text(text: str, max_chunk_size: int = 2000) -> List[str]:
@@ -1341,6 +1423,23 @@ def split_long_text(text: str, max_chunk_size: int = 2000) -> List[str]:
     return chunks
 
 
+@router.post("/parse-file")
+async def parse_uploaded_file(file: UploadFile = File(...)):
+    """
+    解析上传文件并返回提取的正文（不创建任务）。
+    支持 txt、docx、pdf、mobi 等，用于新建任务时「上传文件」填充原文。
+    """
+    ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+    if ext not in SUPPORTED_UPLOAD_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
+    content = await file.read()
+    try:
+        text = parse_text_file(content, ext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"text": text, "filename": file.filename}
+
+
 @router.post("/translations/upload")
 async def upload_and_translate_file(
     file: UploadFile = File(...),
@@ -1354,13 +1453,14 @@ async def upload_and_translate_file(
     db: Session = Depends(get_db)
 ):
     """
-    上传文件并创建翻译任务，支持 txt、md；可选自动执行四步流程。
+    上传文件并创建翻译任务。支持：txt, docx, pdf, mobi 及 md/html/xml/json/csv 等文本格式；可选自动执行四步流程。
     """
-    file_extension = file.filename.split('.')[-1].lower()
-    if file_extension not in ['txt', 'md']:
+    file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+    if file_extension not in SUPPORTED_UPLOAD_EXTENSIONS:
+        supported = ', '.join(sorted(SUPPORTED_UPLOAD_EXTENSIONS))
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件格式: {file_extension}. 支持: txt, md"
+            detail=f"不支持的文件格式: {file_extension}. 支持: {supported}"
         )
     content = await file.read()
     try:

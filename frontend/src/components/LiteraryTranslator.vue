@@ -98,12 +98,12 @@
             ref="uploadRef"
             :auto-upload="false"
             :show-file-list="false"
-            accept=".txt,.md"
+            :accept="uploadAccept"
             @change="onFileSelect"
           >
             <el-button type="default" size="small">
               <el-icon><Upload /></el-icon>
-              上传文件翻译（txt/md）
+              上传文件翻译
             </el-button>
           </el-upload>
         </div>
@@ -299,16 +299,54 @@
           class="history-item"
           @click="loadTask(task)"
         >
-          <div class="history-title">{{ task.title || `任务 #${task.id}` }}</div>
-          <div class="history-meta">
-            <el-tag size="small" :type="getStatusType(task.status)">
-              {{ getStatusText(task.status) }}
-            </el-tag>
-            <span class="history-date">{{ formatDate(task.created_at) }}</span>
+          <div class="history-main">
+            <div class="history-title">{{ task.title || `任务 #${task.id}` }}</div>
+            <div class="history-meta">
+              <el-tag size="small" :type="getStatusType(task.status)">
+                {{ getStatusText(task.status) }}
+              </el-tag>
+              <span class="history-date">{{ formatDate(task.created_at) }}</span>
+            </div>
+          </div>
+          <div class="history-actions" @click.stop>
+            <el-tooltip content="修改" placement="top">
+              <el-button link type="primary" size="small" circle @click="openEditTaskDialog(task)">
+                <el-icon><Edit /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="删除" placement="top">
+              <el-button link type="danger" size="small" circle @click="confirmDeleteTask(task)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </el-tooltip>
           </div>
         </div>
       </div>
     </el-drawer>
+
+    <!-- 编辑任务对话框 -->
+    <el-dialog v-model="showEditTask" title="修改任务" width="420px" destroy-on-close>
+      <el-form v-if="editingTask" label-position="top">
+        <el-form-item label="任务标题">
+          <el-input v-model="editForm.title" placeholder="选填，如：第一章" maxlength="200" show-word-limit />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="editForm.status" placeholder="状态" style="width: 100%;">
+            <el-option label="待开始" value="pending" />
+            <el-option label="翻译中" value="translating" />
+            <el-option label="校验中" value="verifying" />
+            <el-option label="修改中" value="revising" />
+            <el-option label="定稿中" value="finalizing" />
+            <el-option label="已完成" value="completed" />
+            <el-option label="失败" value="failed" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showEditTask = false">取消</el-button>
+        <el-button type="primary" @click="submitEditTask">保存</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 导出对话框 -->
     <el-dialog v-model="showExport" title="导出译文" width="480px">
@@ -343,8 +381,8 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Document, Memo, Monitor, DataLine, Grid, Upload } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Document, Memo, Monitor, DataLine, Grid, Upload, Edit, Delete } from '@element-plus/icons-vue'
 import { literaryApi, translateApi } from '@/api'
 import TermLibraryPanel from './TermLibraryPanel.vue'
 
@@ -374,6 +412,9 @@ const showComparison = ref(false)
 const showTermLibrary = ref(false)
 const showHistory = ref(false)
 const showExport = ref(false)
+const showEditTask = ref(false)
+const editingTask = ref<any>(null)
+const editForm = ref({ title: '', status: '' })
 const termPanelRef = ref<any>(null)
 const taskHistory = ref<any[]>([])
 const currentStep = ref(0)
@@ -501,12 +542,14 @@ const startTranslation = async () => {
   }
 }
 
+const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
+const allowedUploadExtensions = new Set(['txt', 'md', 'markdown', 'text', 'doc', 'docx', 'pdf', 'mobi', 'azw', 'html', 'htm', 'xml', 'json', 'csv', 'yaml', 'yml', 'rst', 'tex', 'srt', 'sub', 'vtt', 'log', 'ini', 'cfg', 'properties'])
 const onFileSelect = async (opts: { file: File }) => {
   const file = opts?.file
   if (!file) return
   const ext = file.name.split('.').pop()?.toLowerCase()
-  if (ext !== 'txt' && ext !== 'md') {
-    ElMessage.warning('仅支持 .txt、.md 文件')
+  if (!ext || !allowedUploadExtensions.has(ext)) {
+    ElMessage.warning('请选择支持的文件：txt、docx、pdf、mobi 或常见文本格式')
     return
   }
   isTranslating.value = true
@@ -649,6 +692,54 @@ const loadHistory = async () => {
     taskHistory.value = response.data
   } catch (error) {
     console.error('Failed to load history:', error)
+  }
+}
+
+const openEditTaskDialog = (task: any) => {
+  editingTask.value = task
+  editForm.value = { title: task.title || '', status: task.status || 'pending' }
+  showEditTask.value = true
+}
+
+const submitEditTask = async () => {
+  if (!editingTask.value) return
+  const id = editingTask.value.id
+  try {
+    await literaryApi.updateTranslation(id, {
+      title: editForm.value.title || undefined,
+      status: editForm.value.status || undefined
+    })
+    ElMessage.success('已保存')
+    showEditTask.value = false
+    editingTask.value = null
+    await loadHistory()
+    if (currentTask.value?.id === id) {
+      const t = taskHistory.value.find((x: any) => x.id === id)
+      if (t) currentTask.value = t
+    }
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+const confirmDeleteTask = async (task: any) => {
+  try {
+    await ElMessageBox.confirm('确定删除该翻译任务？删除后不可恢复。', '删除确认', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await literaryApi.deleteTranslation(task.id)
+    ElMessage.success('已删除')
+    taskHistory.value = taskHistory.value.filter((t: any) => t.id !== task.id)
+    if (currentTask.value?.id === task.id) {
+      currentTask.value = null
+      inputText.value = ''
+      outputText.value = ''
+      currentStep.value = 0
+    }
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败')
   }
 }
 
@@ -1000,6 +1091,10 @@ onMounted(() => {
 
   .history-list {
     .history-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
       padding: 16px;
       border-bottom: 1px solid #ebeef5;
       cursor: pointer;
@@ -1008,22 +1103,27 @@ onMounted(() => {
       &:hover {
         background: #f5f7fa;
       }
+    }
+    .history-main {
+      flex: 1;
+      min-width: 0;
+    }
+    .history-title {
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+    .history-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
 
-      .history-title {
-        font-weight: 500;
-        margin-bottom: 8px;
+      .history-date {
+        font-size: 13px;
+        color: #909399;
       }
-
-      .history-meta {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-
-        .history-date {
-          font-size: 13px;
-          color: #909399;
-        }
-      }
+    }
+    .history-actions {
+      flex-shrink: 0;
     }
   }
 }

@@ -175,6 +175,7 @@ class LiteraryTranslationCreate(BaseModel):
     target_lang: str = Field(..., min_length=1)
     literary_type: LiteraryType = Field(default=LiteraryType.GENERAL)
     reference_document_ids: Optional[List[int]] = Field(default=None)
+    user_requirements: Optional[str] = Field(default=None, description="翻译需求说明（风格、术语等）")
 
 
 class LiteraryParagraphResponse(BaseModel):
@@ -218,6 +219,7 @@ class LiteraryTranslationResponse(BaseModel):
     ai_provider: Optional[str]
     ai_model: Optional[str]
     reference_document_ids: List[int]
+    user_requirements: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime]
     completed_at: Optional[datetime]
@@ -275,7 +277,7 @@ class LiteraryTranslationWorkflowResponse(BaseModel):
 
 class ExportTranslationRequest(BaseModel):
     """导出翻译请求"""
-    format: str = Field(default="txt", pattern="^(txt|md|docx)$")
+    format: str = Field(default="txt", pattern="^(txt|md|html|json|csv)$")
     include_source: bool = Field(default=False, description="是否包含原文")
 
 
@@ -288,3 +290,85 @@ class RAGTranslationRequest(BaseModel):
     target_lang: str = Field(...)
     reference_document_ids: Optional[List[int]] = Field(default=None)
     literary_type: LiteraryType = Field(default=LiteraryType.GENERAL)
+
+
+# ============================================================
+# 专业词库 Schemas
+# ============================================================
+
+class ProfessionalTermCreate(BaseModel):
+    """创建专业词汇请求"""
+    source_term: str = Field(..., min_length=1, max_length=500)
+    target_term: str = Field(..., min_length=1, max_length=500)
+    literary_type: LiteraryType = Field(default=LiteraryType.GENERAL)
+    category: Optional[str] = Field(default=None, max_length=100)
+    source_lang: str = Field(..., min_length=1)
+    target_lang: str = Field(..., min_length=1)
+    description: Optional[str] = None
+
+
+class ProfessionalTermUpdate(BaseModel):
+    """更新专业词汇请求"""
+    target_term: Optional[str] = Field(default=None, max_length=500)
+    category: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = None
+    is_verified: Optional[bool] = None
+
+
+class ProfessionalTermResponse(BaseModel):
+    """专业词汇响应"""
+    id: int
+    source_term: str
+    target_term: str
+    literary_type: str
+    category: Optional[str]
+    source_lang: str
+    target_lang: str
+    usage_count: int
+    description: Optional[str]
+    is_verified: bool
+    created_at: datetime
+    updated_at: Optional[datetime]
+    
+    class Config:
+        from_attributes = True
+
+
+class ProfessionalTermListRequest(BaseModel):
+    """专业词汇列表查询请求"""
+    literary_type: Optional[LiteraryType] = None
+    category: Optional[str] = None
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
+    keyword: Optional[str] = None
+    is_verified: Optional[bool] = None
+
+
+class TermItem(BaseModel):
+    """词汇项"""
+    source_term: str
+    target_term: str
+    category: Optional[str] = None
+    description: Optional[str] = None
+
+
+class TranslationTermSummaryResponse(BaseModel):
+    """翻译任务专业词汇总结响应"""
+    id: int
+    translation_id: int
+    terms: List[TermItem]
+    total_terms: int
+    new_terms: int
+    updated_terms: int
+    summary_text: Optional[str]
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class TermExtractionResult(BaseModel):
+    """词汇提取结果"""
+    terms: List[TermItem]
+    summary: str
+    total_count: int

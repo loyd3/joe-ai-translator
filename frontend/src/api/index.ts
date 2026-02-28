@@ -110,6 +110,7 @@ export const literaryApi = {
     target_lang: string
     literary_type: 'poetry' | 'prose' | 'novel' | 'drama' | 'general'
     reference_document_ids?: number[]
+    user_requirements?: string
   }) => api.post('/literary/translations', data),
   
   // 获取翻译任务列表
@@ -143,6 +144,9 @@ export const literaryApi = {
   
   // 获取工作流状态
   getWorkflowStatus: (id: number) => api.get(`/literary/translations/${id}/workflow`),
+
+  // 一键自动执行四步流程（初译→校验→修改→定稿）
+  runAllWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/run-all`),
   
   // ===== 段落管理 =====
   
@@ -155,10 +159,74 @@ export const literaryApi = {
     api.put(`/literary/paragraphs/${paragraphId}`, data),
   
   // ===== 导出 =====
-  
+
   // 导出翻译结果
-  exportTranslation: (id: number, data: { format: 'txt' | 'md' | 'docx'; include_source?: boolean }) => 
+  exportTranslation: (id: number, data: { format: 'txt' | 'md' | 'html' | 'json' | 'csv'; include_source?: boolean }) =>
     api.post(`/literary/translations/${id}/export`, data),
+
+  // ===== 专业词库 =====
+
+  // 获取专业词汇列表
+  listTerms: (params?: {
+    literary_type?: string;
+    category?: string;
+    source_lang?: string;
+    target_lang?: string;
+    keyword?: string;
+    is_verified?: boolean;
+    skip?: number;
+    limit?: number;
+  }) => api.get('/literary/terms', { params }),
+
+  // 创建专业词汇
+  createTerm: (data: {
+    source_term: string;
+    target_term: string;
+    literary_type: string;
+    category?: string;
+    source_lang: string;
+    target_lang: string;
+    description?: string;
+  }) => api.post('/literary/terms', data),
+
+  // 更新专业词汇
+  updateTerm: (id: number, data: {
+    target_term?: string;
+    category?: string;
+    description?: string;
+    is_verified?: boolean;
+  }) => api.put(`/literary/terms/${id}`, data),
+
+  // 删除专业词汇
+  deleteTerm: (id: number) => api.delete(`/literary/terms/${id}`),
+
+  // 获取词汇分类列表
+  getTermCategories: (params?: { literary_type?: string }) =>
+    api.get('/literary/terms/categories', { params }),
+
+  // 获取翻译任务的词汇总结
+  getTermSummary: (translationId: number) =>
+    api.get(`/literary/translations/${translationId}/terms`),
+
+  // 手动触发词汇提取
+  extractTerms: (translationId: number) =>
+    api.post(`/literary/translations/${translationId}/terms/extract`),
+
+  // ===== 长文件翻译 =====
+
+  // 上传文件创建翻译任务
+  uploadAndTranslate: (formData: FormData) =>
+    api.post('/literary/translations/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    }),
+
+  // 一键翻译所有段落
+  translateAllChunks: (translationId: number) =>
+    api.post(`/literary/translations/${translationId}/translate-all`),
+
+  // 获取翻译进度
+  getTranslationProgress: (translationId: number) =>
+    api.get(`/literary/translations/${translationId}/progress`),
 }
 
 export default api

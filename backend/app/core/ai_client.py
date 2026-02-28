@@ -634,6 +634,90 @@ Output only the translated text, no additional comments."""
             "translator_note": step4_result.get("translator_note", ""),
         }
 
+    async def extract_professional_terms(
+        self,
+        source_text: str,
+        translated_text: str,
+        source_lang: str,
+        target_lang: str,
+        literary_type: str = "general",
+        existing_terms: Optional[List[dict]] = None,
+    ) -> dict:
+        """
+        提取和总结专业词汇
+        分析原文和译文，提取专业术语、特色词汇，并判断哪些是新增的
+        """
+        source_name = self.get_language_name(source_lang)
+        target_name = self.get_language_name(target_lang)
+        lit_type_name = self.get_literary_type_name(literary_type)
+
+        existing_terms_text = ""
+        if existing_terms:
+            existing_terms_text = "\n\n## 已有词汇库\n" + "\n".join([
+                f"- {t['source_term']} -> {t['target_term']}"
+                for t in existing_terms[:50]
+            ])
+
+        system_prompt = f"""你是一位专业的文学翻译术语分析专家。请分析以下{lit_type_name}的原文和译文，提取专业术语和特色词汇。
+
+## 分析要求
+
+### 1. 词汇类型
+- **专业术语**：特定领域的专有名词、技术术语
+- **文学特色词**：具有文学审美价值的词汇、修辞手法相关的词汇
+- **文化特有词**：反映特定文化内涵的词汇
+- **风格标志性词汇**：体现作者或体裁风格的特色表达
+
+### 2. 提取标准
+- 选择具有翻译难度或值得记录的词汇
+- 关注翻译策略和技巧的体现
+- 注意一词多译或一译多词的情况
+- 优先选择具有代表性的词汇
+
+### 3. 输出格式
+请以JSON格式输出：
+{{
+    "terms": [
+        {{
+            "source_term": "源语言词汇",
+            "target_term": "目标语言翻译",
+            "category": "词汇分类（如：诗歌术语/修辞手法/文化词汇等）",
+            "description": "简要的翻译说明或例句语境"
+        }}
+    ],
+    "summary": "对本次翻译专业词汇的总体分析和说明",
+    "total_count": 词汇总数（整数）
+}}
+
+注意：
+- 只提取真正有特色、有价值的词汇，不要罗列普通词汇
+- 词汇数量控制在5-20个，质量优先于数量
+- category字段用于归类，便于后续检索和管理"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"【原文】(source_name):\n{source_text}\n\n【译文】(target_name):\n{translated_text}{existing_terms_text}\n\n请提取和分析专业词汇。"}
+        ]
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=self.settings.ai_max_tokens,
+            response_format={"type": "json_object"}
+        )
+
+        import json
+        try:
+            result = json.loads(response.choices[0].message.content)
+            return result
+        except Exception as e:
+            return {
+                "terms": [],
+                "summary": "词汇提取过程中出现问题",
+                "total_count": 0
+            }
+
 
 # 全局客户端实例（延迟初始化）
 _ai_client_instance: Optional[AIClient] = None

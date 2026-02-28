@@ -92,6 +92,9 @@ class LiteraryTranslation(Base):
     # 参考文档关联
     reference_document_ids = Column(JSON, default=list, comment="关联的参考文档ID列表")
     
+    # 用户翻译前指明的需求（风格、术语等）
+    user_requirements = Column(Text, nullable=True, comment="用户翻译需求说明")
+    
     # 用户编辑的最终译文
     final_translation = Column(Text, nullable=True, comment="用户编辑后的最终译文")
     
@@ -162,3 +165,73 @@ class ReferenceDocument(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+# ============================================================
+# 专业词库功能
+# ============================================================
+
+class ProfessionalTerm(Base):
+    """专业词汇库"""
+    __tablename__ = "professional_terms"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # 词汇信息
+    source_term = Column(String(500), nullable=False, comment="源语言词汇")
+    target_term = Column(String(500), nullable=False, comment="目标语言翻译")
+    
+    # 分类信息
+    literary_type = Column(String(50), nullable=False, comment="文学类型: poetry, prose, novel, drama, general")
+    category = Column(String(100), nullable=True, comment="词汇分类/领域")
+    
+    # 语言对
+    source_lang = Column(String(10), nullable=False)
+    target_lang = Column(String(10), nullable=False)
+    
+    # 使用统计
+    usage_count = Column(Integer, default=1, comment="使用次数")
+    
+    # 描述/例句
+    description = Column(Text, nullable=True, comment="词汇说明/例句")
+    
+    # 关联的翻译任务
+    translation_id = Column(Integer, ForeignKey("literary_translations.id"), nullable=True, comment="来源翻译任务")
+    
+    # 是否审核通过（防止错误词汇）
+    is_verified = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # 唯一约束：同类型、同语言对、同源词汇只能有一个
+    __table_args__ = (
+        # 使用Index来创建复合唯一约束
+        {'mysql_charset': 'utf8mb4', 'mysql_collate': 'utf8mb4_unicode_ci'}
+    )
+
+
+class TranslationTermSummary(Base):
+    """翻译任务专业词汇总结"""
+    __tablename__ = "translation_term_summaries"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # 关联的翻译任务
+    translation_id = Column(Integer, ForeignKey("literary_translations.id", ondelete="CASCADE"), nullable=False)
+    
+    # 总结的词汇列表（JSON格式）
+    terms = Column(JSON, default=list, comment="本次翻译涉及的专业词汇列表")
+    
+    # 词汇统计
+    total_terms = Column(Integer, default=0, comment="词汇总数")
+    new_terms = Column(Integer, default=0, comment="新增词汇数")
+    updated_terms = Column(Integer, default=0, comment="更新词汇数")
+    
+    # AI总结说明
+    summary_text = Column(Text, nullable=True, comment="AI对专业词汇的总结说明")
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # 关联
+    translation = relationship("LiteraryTranslation")

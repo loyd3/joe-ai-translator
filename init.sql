@@ -167,7 +167,47 @@ INSERT INTO system_settings (setting_key, setting_value, description) VALUES
 ('default_source_lang', 'auto', '默认源语言'),
 ('default_target_lang', 'en', '默认目标语言'),
 ('max_text_length', '5000', '单次最大翻译字符数'),
-('literary_translation_enabled', '1', '是否启用文学翻译功能');-- ========================================================-- 查看创建结果-- ========================================================
+('literary_translation_enabled', '1', '是否启用文学翻译功能');-- ========================================================-- 专业词库表（新增）-- ========================================================
+DROP TABLE IF EXISTS professional_terms;
+
+CREATE TABLE professional_terms (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    source_term VARCHAR(500) NOT NULL COMMENT '源语言词汇',
+    target_term VARCHAR(500) NOT NULL COMMENT '目标语言翻译',
+    literary_type VARCHAR(50) NOT NULL COMMENT '文学类型: poetry, prose, novel, drama, general',
+    category VARCHAR(100) NULL COMMENT '词汇分类/领域',
+    source_lang VARCHAR(10) NOT NULL COMMENT '源语言',
+    target_lang VARCHAR(10) NOT NULL COMMENT '目标语言',
+    usage_count INT DEFAULT 1 COMMENT '使用次数',
+    description TEXT NULL COMMENT '词汇说明/例句',
+    translation_id INT NULL COMMENT '来源翻译任务ID',
+    is_verified TINYINT(1) DEFAULT 1 COMMENT '是否审核通过',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at TIMESTAMP NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    INDEX idx_literary_type (literary_type),
+    INDEX idx_category (category),
+    INDEX idx_source_lang (source_lang),
+    INDEX idx_target_lang (target_lang),
+    INDEX idx_is_verified (is_verified),
+    INDEX idx_source_term (source_term),
+    FOREIGN KEY (translation_id) REFERENCES literary_translations(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='专业词汇库';-- ========================================================-- 翻译词汇总结表（新增）-- ========================================================
+DROP TABLE IF EXISTS translation_term_summaries;
+
+CREATE TABLE translation_term_summaries (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    translation_id INT NOT NULL COMMENT '关联的翻译任务ID',
+    terms JSON NOT NULL COMMENT '本次翻译涉及的专业词汇列表',
+    total_terms INT DEFAULT 0 COMMENT '词汇总数',
+    new_terms INT DEFAULT 0 COMMENT '新增词汇数',
+    updated_terms INT DEFAULT 0 COMMENT '更新词汇数',
+    summary_text TEXT NULL COMMENT 'AI对专业词汇的总结说明',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    
+    INDEX idx_translation_id (translation_id),
+    FOREIGN KEY (translation_id) REFERENCES literary_translations(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='翻译任务专业词汇总结';-- ========================================================-- 查看创建结果-- ========================================================
 SHOW TABLES;
 
 SELECT 

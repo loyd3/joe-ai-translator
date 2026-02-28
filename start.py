@@ -10,6 +10,10 @@ import os
 import signal
 import time
 
+# Windows 下子进程输出用 UTF-8 解码，避免 GBK 解码报错
+SUBPROCESS_ENCODING = "utf-8"
+SUBPROCESS_ERRORS = "replace"
+
 # 颜色输出
 GREEN = "\033[92m"
 BLUE = "\033[94m"
@@ -22,9 +26,40 @@ def print_header(text):
     print(f"{BLUE}  {text}{RESET}")
     print(f"{BLUE}{'='*60}{RESET}\n")
 
-def check_command(cmd):
-    """检查命令是否存在"""
-    return subprocess.run(f"which {cmd}", shell=True, capture_output=True).returncode == 0
+def check_command(cmd, version_flag="--version"):
+    """检查命令是否存在（跨平台：不依赖 which）"""
+    try:
+        result = subprocess.run(
+            [cmd] + version_flag.split() if isinstance(version_flag, str) else [cmd] + version_flag,
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def find_python():
+    """返回可用的 Python 命令（优先 3.11+，兼容 Windows 的 py 启动器）"""
+    candidates = ["python3", "python"]
+    if sys.platform == "win32":
+        candidates = ["py", "py -3", "python", "python3"]  # Windows: 先试 Python Launcher
+    for cmd in candidates:
+        args = cmd.split()
+        try:
+            result = subprocess.run(
+                args + ["--version"],
+                capture_output=True,
+                text=True,
+                encoding=SUBPROCESS_ENCODING,
+                errors=SUBPROCESS_ERRORS,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return " ".join(args)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return None
 
 def run_command(cmd, cwd=None, env=None):
     """运行命令并返回进程"""
@@ -76,11 +111,11 @@ def main():
     try:
         # 检查 Python
         print(f"{YELLOW}🔍 检查环境...{RESET}")
-        if not check_command("python3") and not check_command("python"):
+        python_cmd = find_python()
+        if not python_cmd:
             print(f"{RED}❌ 未找到 Python，请安装 Python 3.11+{RESET}")
+            print(f"   Windows: 从 https://www.python.org/downloads/ 安装并勾选「Add Python to PATH」")
             sys.exit(1)
-        
-        python_cmd = "python3" if check_command("python3") else "python"
         
         # 检查 Node.js
         if not check_command("node"):
@@ -118,7 +153,14 @@ def main():
         
         # 初始化数据库表
         print(f"\n{YELLOW}🗄️  初始化数据库表...{RESET}")
-        result = subprocess.run([python_cmd, "init_db.py"], cwd=root_dir, capture_output=True, text=True)
+        result = subprocess.run(
+            python_cmd.split() + ["init_db.py"],
+            cwd=root_dir,
+            capture_output=True,
+            text=True,
+            encoding=SUBPROCESS_ENCODING,
+            errors=SUBPROCESS_ERRORS,
+        )
         if result.returncode == 0:
             print(f"{GREEN}✅ 数据库表初始化完成{RESET}")
         else:
@@ -131,7 +173,7 @@ def main():
         venv_dir = os.path.join(backend_dir, "venv")
         if not os.path.exists(venv_dir):
             print(f"  创建虚拟环境...")
-            subprocess.run([python_cmd, "-m", "venv", "venv"], cwd=backend_dir)
+            subprocess.run(python_cmd.split() + ["-m", "venv", "venv"], cwd=backend_dir)
         
         pip_cmd = os.path.join(venv_dir, "bin", "pip") if sys.platform != "win32" else os.path.join(venv_dir, "Scripts", "pip.exe")
         subprocess.run([pip_cmd, "install", "-q", "-r", "requirements.txt"], cwd=backend_dir)

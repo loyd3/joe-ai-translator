@@ -4,9 +4,15 @@
 """
 
 import os
+from pathlib import Path
 import openai
 from pydantic_settings import BaseSettings
 from typing import AsyncGenerator, Optional, List
+
+# 项目根目录 .env（与 start.py 同目录），便于从 backend/ 启动时也能读到
+# backend/app/core -> parent*3=backend -> parent*4=项目根
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -37,7 +43,8 @@ class Settings(BaseSettings):
     custom_model: Optional[str] = None
     
     class Config:
-        env_file = ".env"
+        # 优先项目根 .env，不存在则用当前目录 .env
+        env_file = str(_ENV_FILE) if _ENV_FILE.exists() else ".env"
 
 
 # 全局配置实例

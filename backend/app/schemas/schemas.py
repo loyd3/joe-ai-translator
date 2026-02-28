@@ -42,7 +42,7 @@ class TranslationHistoryItem(BaseModel):
 
 class BatchTranslationRequest(BaseModel):
     """批量翻译请求"""
-    items: List[str] = Field(..., min_items=1, description="要翻译的文本列表")
+    items: List[str] = Field(..., min_length=1, description="要翻译的文本列表")
     source_lang: str = Field(default="auto", description="源语言代码")
     target_lang: str = Field(..., description="目标语言代码")
     context: Optional[str] = Field(default=None, description="翻译上下文")

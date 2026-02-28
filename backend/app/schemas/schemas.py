@@ -5,6 +5,7 @@ Pydantic 数据模型
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
+from enum import Enum
 
 
 class TranslationRequest(BaseModel):
@@ -52,7 +53,7 @@ class BatchTranslationItem(BaseModel):
     id: int
     source_text: str
     translated_text: Optional[str] = None
-    status: str  # pending, completed, failed
+    status: str
 
 
 class BatchTranslationResponse(BaseModel):
@@ -76,3 +77,214 @@ class LanguageInfo(BaseModel):
     """语言信息"""
     code: str
     name: str
+
+
+# ============================================================
+# 文学翻译相关 Schemas
+# ============================================================
+
+class LiteraryType(str, Enum):
+    """文学类型"""
+    POETRY = "poetry"       # 诗歌
+    PROSE = "prose"         # 散文
+    NOVEL = "novel"         # 小说
+    DRAMA = "drama"         # 戏剧
+    GENERAL = "general"     # 一般文学
+
+
+class DocType(str, Enum):
+    """参考文档类型"""
+    TERMINOLOGY = "terminology"     # 术语库
+    STYLE_GUIDE = "style_guide"     # 风格指南
+    REFERENCE = "reference"         # 参考译文
+    GENERAL = "general"             # 一般文档
+
+
+class TranslationStep(int, Enum):
+    """翻译步骤"""
+    TRANSLATE = 1       # 翻译
+    VERIFY = 2          # 校验
+    REVISE = 3          # 修改
+    FINALIZE = 4        # 定稿
+
+
+# ----- 参考文档 Schemas -----
+
+class ReferenceDocumentCreate(BaseModel):
+    """创建参考文档请求"""
+    name: str = Field(..., min_length=1, max_length=255)
+    content: str = Field(..., min_length=1)
+    doc_type: DocType = Field(default=DocType.GENERAL)
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ReferenceDocumentUpdate(BaseModel):
+    """更新参考文档请求"""
+    name: Optional[str] = Field(default=None, max_length=255)
+    content: Optional[str] = None
+    doc_type: Optional[DocType] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ReferenceDocumentResponse(BaseModel):
+    """参考文档响应"""
+    id: int
+    name: str
+    file_type: str
+    file_size: int
+    content: str
+    doc_type: str
+    source_lang: Optional[str]
+    target_lang: Optional[str]
+    description: Optional[str]
+    is_active: bool
+    created_at: datetime
+    updated_at: Optional[datetime]
+    
+    class Config:
+        from_attributes = True
+
+
+class ReferenceDocumentListItem(BaseModel):
+    """参考文档列表项（不包含内容）"""
+    id: int
+    name: str
+    file_type: str
+    file_size: int
+    doc_type: str
+    source_lang: Optional[str]
+    target_lang: Optional[str]
+    description: Optional[str]
+    is_active: bool
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+# ----- 文学翻译 Schemas -----
+
+class LiteraryTranslationCreate(BaseModel):
+    """创建文学翻译任务请求"""
+    title: Optional[str] = None
+    source_text: str = Field(..., min_length=1)
+    source_lang: str = Field(..., min_length=1)
+    target_lang: str = Field(..., min_length=1)
+    literary_type: LiteraryType = Field(default=LiteraryType.GENERAL)
+    reference_document_ids: Optional[List[int]] = Field(default=None)
+
+
+class LiteraryParagraphResponse(BaseModel):
+    """文学翻译段落响应"""
+    id: int
+    paragraph_index: int
+    source_text: str
+    translated_text: Optional[str]
+    step1_translation: Optional[str]
+    step2_verification: Optional[str]
+    step3_revision: Optional[str]
+    step4_finalization: Optional[str]
+    user_edited_text: Optional[str]
+    is_edited: bool
+    beauty_sound_score: Optional[float]
+    beauty_word_score: Optional[float]
+    beauty_meaning_score: Optional[float]
+    
+    class Config:
+        from_attributes = True
+
+
+class LiteraryTranslationResponse(BaseModel):
+    """文学翻译任务响应"""
+    id: int
+    title: Optional[str]
+    source_text: str
+    step1_translation: Optional[str]
+    step2_verification: Optional[str]
+    step3_revision: Optional[str]
+    step4_finalization: Optional[str]
+    final_translation: Optional[str]
+    current_step: int
+    status: str
+    source_lang: str
+    target_lang: str
+    literary_type: str
+    beauty_sound_score: Optional[float]
+    beauty_word_score: Optional[float]
+    beauty_meaning_score: Optional[float]
+    ai_provider: Optional[str]
+    ai_model: Optional[str]
+    reference_document_ids: List[int]
+    created_at: datetime
+    updated_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    paragraphs: Optional[List[LiteraryParagraphResponse]] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class LiteraryTranslationListItem(BaseModel):
+    """文学翻译任务列表项"""
+    id: int
+    title: Optional[str]
+    status: str
+    current_step: int
+    source_lang: str
+    target_lang: str
+    literary_type: str
+    beauty_sound_score: Optional[float]
+    beauty_word_score: Optional[float]
+    beauty_meaning_score: Optional[float]
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class ParagraphUpdateRequest(BaseModel):
+    """更新段落译文请求"""
+    user_edited_text: str = Field(..., min_length=0)
+
+
+class LiteraryTranslationUpdate(BaseModel):
+    """更新文学翻译任务请求"""
+    title: Optional[str] = None
+    final_translation: Optional[str] = None
+
+
+class WorkflowStepResponse(BaseModel):
+    """工作流步骤响应"""
+    step: int
+    step_name: str
+    status: str  # pending, processing, completed, failed
+    result: Optional[str] = None
+    analysis: Optional[str] = None  # AI 的分析说明
+    
+
+class LiteraryTranslationWorkflowResponse(BaseModel):
+    """文学翻译工作流响应"""
+    translation_id: int
+    current_step: int
+    overall_status: str
+    steps: List[WorkflowStepResponse]
+
+
+class ExportTranslationRequest(BaseModel):
+    """导出翻译请求"""
+    format: str = Field(default="txt", pattern="^(txt|md|docx)$")
+    include_source: bool = Field(default=False, description="是否包含原文")
+
+
+# ----- RAG 参考请求 Schemas -----
+
+class RAGTranslationRequest(BaseModel):
+    """带RAG的翻译请求"""
+    text: str = Field(..., min_length=1)
+    source_lang: str = Field(default="auto")
+    target_lang: str = Field(...)
+    reference_document_ids: Optional[List[int]] = Field(default=None)
+    literary_type: LiteraryType = Field(default=LiteraryType.GENERAL)

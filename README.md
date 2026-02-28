@@ -6,6 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > 一款支持多模型 AI 的智能翻译助手，提供高质量、上下文感知的翻译服务。
+> 
+> **✨ 新增：文学翻译功能** - 采用 AI 四步翻译流程，追求音美、词美、意美的文学翻译品质。
 
 ---
 
@@ -21,6 +23,13 @@
 - **50+ 种语言支持** - 覆盖全球主要语言
 - **自动语言检测** - 智能识别源语言
 - **专业领域翻译** - 技术、医学、法律等专业术语优化
+
+### 📚 文学翻译（新增）
+- **四步翻译流程** - 翻译 → 校验 → 修改 → 定稿
+- **三美原则** - 音美、词美、意美的全面追求
+- **多种文学体裁** - 支持诗歌、散文、小说、戏剧
+- **RAG 参考文档** - 可上传术语库、风格指南作为翻译参考
+- **对照编辑** - 原文译文段落级对照，支持人工精修
 
 ### 💾 翻译历史与收藏
 - **翻译历史记录** - 自动保存所有翻译记录
@@ -74,6 +83,30 @@ docker-compose up -d
 
 ---
 
+## 📚 文学翻译使用指南
+
+### 四步翻译流程
+
+1. **翻译** - AI 进行初译，注重忠实原文的同时兼顾文学性
+2. **校验** - AI 对照原文检查准确性，并评估三美原则（音美、词美、意美）
+3. **修改** - 根据校验反馈进行针对性润色和提升
+4. **定稿** - 最终审校，确保达到出版品质
+
+### RAG 参考文档
+
+在创建翻译任务时，可以选择参考文档：
+- **术语库** - 确保专业术语翻译一致
+- **风格指南** - 保持特定风格或作者的翻译风格
+- **参考译文** - 参考已有译文保持风格统一
+
+### 三美原则说明
+
+- **音美** - 译文的韵律、节奏、音乐性
+- **词美** - 用词的精准度、优雅度、质感
+- **意美** - 意境的传达、神韵的保留
+
+---
+
 ## 📁 项目结构
 
 ```
@@ -85,15 +118,23 @@ joe-ai-translator/
 ├── backend/              # FastAPI 后端
 │   ├── app/
 │   │   ├── api/         # API 路由
+│   │   │   ├── translate.py           # 普通翻译 API
+│   │   │   └── literary_translation.py # 文学翻译 API（新增）
 │   │   ├── core/        # AI 客户端和配置
+│   │   │   └── ai_client.py           # AI 客户端（含文学翻译方法）
 │   │   ├── models/      # 数据库模型
+│   │   │   └── models.py              # 数据模型（新增文学翻译表）
 │   │   └── services/    # 业务逻辑
 │   └── requirements.txt
 ├── frontend/            # Vue3 前端
 │   └── src/
 │       ├── components/  # UI 组件
+│       │   └── ReferenceDocManager.vue # 参考文档管理（新增）
 │       ├── views/       # 页面视图
-│       └── stores/      # Pinia 状态管理
+│       │   ├── TranslatorView.vue      # 普通翻译
+│       │   └── LiteraryTranslationView.vue # 文学翻译（新增）
+│       ├── router/      # 路由配置
+│       └── api/         # API 客户端
 └── docs/                # 文档
 ```
 
@@ -147,6 +188,9 @@ SOURCE init.sql;
 |------|------|----------|
 | `translation_history` | 翻译历史记录 | source_text, translated_text, source_lang, target_lang, is_favorite |
 | `batch_translations` | 批量翻译任务 | items(JSON), total_items, completed_items, status |
+| `literary_translations` | 文学翻译任务（新增） | 四步翻译结果、三美评分、RAG参考 |
+| `literary_paragraphs` | 文学翻译段落（新增） | 段落级对照、用户编辑 |
+| `reference_documents` | RAG参考文档（新增） | 术语库、风格指南 |
 | `system_settings` | 系统配置 | setting_key, setting_value |
 
 ### 环境变量
@@ -160,6 +204,13 @@ SOURCE init.sql;
 ---
 
 ## 📝 更新日志
+
+### v1.1.0 (2025-02-28)
+- ✅ **文学翻译功能** - AI 四步翻译流程
+- ✅ **三美原则** - 音美、词美、意美评估
+- ✅ **RAG 参考文档** - 支持术语库、风格指南
+- ✅ **段落对照编辑** - 原文译文对照查看和修改
+- ✅ **多种文学体裁** - 诗歌、散文、小说、戏剧
 
 ### v1.0.0
 - ✅ 多模型 AI 翻译支持

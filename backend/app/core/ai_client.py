@@ -17,6 +17,13 @@ _ENV_FILE = _PROJECT_ROOT / ".env"
 
 class Settings(BaseSettings):
     """应用配置"""
+    # 应用与 CORS
+    app_name: str = "AI Translator"
+    app_version: str = "1.0.0"
+    debug: bool = False
+    secret_key: str = "your-secret-key-change-in-production"
+    allowed_origins: str = "http://localhost:5173,http://localhost:3000"
+
     ai_provider: str = "deepseek"
     ai_temperature: float = 0.3
     ai_max_tokens: int = 4096
@@ -24,6 +31,12 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
     db_pool_recycle: int = 3600
+    # MySQL 单独配置（.env 中 MYSQL_USER/MYSQL_PASSWORD 等，供 database 模块拼 URL）
+    mysql_user: Optional[str] = None
+    mysql_password: Optional[str] = None
+    mysql_host: Optional[str] = None
+    mysql_port: Optional[str] = None
+    mysql_database: Optional[str] = None
     
     # DeepSeek
     deepseek_api_key: Optional[str] = None

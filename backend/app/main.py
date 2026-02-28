@@ -23,8 +23,9 @@ async def lifespan(app: FastAPI):
         logger.info("Database tables ready.")
     except OperationalError as e:
         logger.warning(
-            "Database unavailable at startup (tables not created): %s. "
-            "Check .env: DATABASE_URL (MySQL user/password) and that MySQL is running.",
+            "MySQL 连接失败（未创建表）: %s。请检查：1) MySQL 服务已启动；"
+            "2) .env 中用户名/密码正确；若密码含 #@ 等特殊字符，请用 MYSQL_USER/MYSQL_PASSWORD 分别配置，或对 DATABASE_URL 中密码做 URL 编码；"
+            "3) 可尝试将 host 改为 127.0.0.1。",
             e,
         )
     yield

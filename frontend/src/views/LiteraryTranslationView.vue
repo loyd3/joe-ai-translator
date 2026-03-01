@@ -3,7 +3,10 @@
     <!-- 侧边栏 -->
     <div class="sidebar">
       <div class="sidebar-header">
-        <span class="brand">译智通</span>
+        <div class="brand-wrap">
+          <span class="brand">译智通</span>
+          <span class="brand-sub">文学翻译为主</span>
+        </div>
         <div class="header-btns">
           <el-button v-if="batchMode" text size="small" @click="exitBatchMode">取消</el-button>
           <el-button
@@ -24,9 +27,17 @@
         </div>
       </div>
 
+      <div class="category-filter">
+        <el-radio-group v-model="categoryGroup" size="small" class="category-group">
+          <el-radio-button label="all">全部</el-radio-button>
+          <el-radio-button label="literary">文学</el-radio-button>
+          <el-radio-button label="professional">专业</el-radio-button>
+        </el-radio-group>
+      </div>
+
       <div class="task-list" v-loading="loadingTasks">
         <div
-          v-for="task in taskList"
+          v-for="task in filteredTaskList"
           :key="task.id"
           :class="['task-item', { active: !batchMode && currentTask?.id === task.id, selected: batchMode && selectedTaskIds.includes(task.id) }]"
           @click="batchMode ? toggleTaskSelection(task.id) : selectTask(task)"
@@ -43,7 +54,7 @@
             <div class="task-title">{{ task.title || `任务 #${task.id}` }}</div>
             <div class="task-meta">
               <el-tag size="small" :type="getStatusType(task.status)">{{ getStatusText(task.status) }}</el-tag>
-              <span class="task-lang">{{ task.source_lang }} → {{ task.target_lang }}</span>
+              <el-tag size="small" :type="isLiteraryType(task.literary_type) ? '' : 'warning'" effect="plain" round>{{ getTypeName(task.literary_type) }}</el-tag>
             </div>
           </div>
           <div class="task-actions" v-if="!batchMode" @click.stop>
@@ -51,7 +62,7 @@
             <el-button link type="danger" size="small" @click="confirmDeleteTask(task)"><el-icon><Delete /></el-icon></el-button>
           </div>
         </div>
-        <el-empty v-if="taskList.length === 0" description="暂无任务" :image-size="60" />
+        <el-empty v-if="filteredTaskList.length === 0" description="暂无任务" :image-size="60" />
       </div>
     </div>
 
@@ -61,8 +72,8 @@
       <div v-if="!currentTask" class="empty-state" @click="createNewTask">
         <div class="empty-card">
           <el-icon class="empty-icon"><Plus /></el-icon>
-          <h2>创建翻译任务</h2>
-          <p>点击新建文学翻译任务</p>
+          <h2>{{ categoryGroup === 'professional' ? '创建专业翻译任务' : '创建文学翻译任务' }}</h2>
+          <p>{{ categoryGroup === 'professional' ? '支持科技、商业、贸易、法律、医学等专业领域' : '诗歌、散文、小说、戏剧等文学作品精译' }}</p>
         </div>
       </div>
 
@@ -79,6 +90,14 @@
               <el-select v-model="currentTask.target_lang" size="small" class="lang-sel">
                 <el-option v-for="lang in targetLanguages" :key="lang.code" :label="lang.name" :value="lang.code" />
               </el-select>
+
+              <el-tag
+                size="small"
+                :type="isLiteraryType(currentTask.literary_type) ? '' : 'warning'"
+                effect="plain"
+                round
+                class="type-badge"
+              >{{ getTypeName(currentTask.literary_type) }}</el-tag>
 
               <el-divider direction="vertical" />
 
@@ -102,13 +121,20 @@
               <el-popover v-if="hasBeautyScores" placement="bottom" :width="200" trigger="hover">
                 <template #reference>
                   <el-button size="small" link>
-                    三美评分
+                    {{ isLiteraryType(currentTask.literary_type) ? '三美评分' : '质量评分' }}
                   </el-button>
                 </template>
                 <div class="score-popover">
-                  <div class="score-row"><span>音美</span><span>{{ beautyScores.sound.toFixed(1) }}</span></div>
-                  <div class="score-row"><span>词美</span><span>{{ beautyScores.word.toFixed(1) }}</span></div>
-                  <div class="score-row"><span>意美</span><span>{{ beautyScores.meaning.toFixed(1) }}</span></div>
+                  <template v-if="isLiteraryType(currentTask.literary_type)">
+                    <div class="score-row"><span>音美</span><span>{{ beautyScores.sound.toFixed(1) }}</span></div>
+                    <div class="score-row"><span>词美</span><span>{{ beautyScores.word.toFixed(1) }}</span></div>
+                    <div class="score-row"><span>意美</span><span>{{ beautyScores.meaning.toFixed(1) }}</span></div>
+                  </template>
+                  <template v-else>
+                    <div class="score-row"><span>术语</span><span>{{ beautyScores.sound.toFixed(1) }}</span></div>
+                    <div class="score-row"><span>规范</span><span>{{ beautyScores.word.toFixed(1) }}</span></div>
+                    <div class="score-row"><span>完整</span><span>{{ beautyScores.meaning.toFixed(1) }}</span></div>
+                  </template>
                 </div>
               </el-popover>
               <el-button size="small" @click="goToResultPage">
@@ -191,7 +217,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showCreateDialog" title="新建翻译任务" width="600px" destroy-on-close>
+    <el-dialog v-model="showCreateDialog" :title="categoryGroup === 'professional' ? '新建专业翻译任务' : '新建文学翻译任务'" width="600px" destroy-on-close>
       <el-form :model="newTaskForm" label-position="top">
         <el-row :gutter="16">
           <el-col :span="12">
@@ -200,13 +226,22 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="文学类型">
+            <el-form-item label="翻译类型">
               <el-select v-model="newTaskForm.literary_type" style="width: 100%;">
-                <el-option label="一般" value="general" />
-                <el-option label="诗歌" value="poetry" />
-                <el-option label="散文" value="prose" />
-                <el-option label="小说" value="novel" />
-                <el-option label="戏剧" value="drama" />
+                <el-option-group label="文学">
+                  <el-option label="一般" value="general" />
+                  <el-option label="诗歌" value="poetry" />
+                  <el-option label="散文" value="prose" />
+                  <el-option label="小说" value="novel" />
+                  <el-option label="戏剧" value="drama" />
+                </el-option-group>
+                <el-option-group label="专业">
+                  <el-option label="科技" value="tech" />
+                  <el-option label="商业" value="business" />
+                  <el-option label="贸易" value="trade" />
+                  <el-option label="法律" value="legal" />
+                  <el-option label="医学" value="medical" />
+                </el-option-group>
               </el-select>
             </el-form-item>
           </el-col>
@@ -304,6 +339,22 @@ const exportWithSource = ref(false)
 const batchMode = ref(false)
 const selectedTaskIds = ref<number[]>([])
 const batchStarting = ref(false)
+
+const LITERARY_TYPES = new Set(['poetry', 'prose', 'novel', 'drama', 'general'])
+const categoryGroup = ref<string>('literary')
+
+const filteredTaskList = computed(() => {
+  if (categoryGroup.value === 'all') return taskList.value
+  if (categoryGroup.value === 'literary') return taskList.value.filter((t: any) => LITERARY_TYPES.has(t.literary_type || 'general'))
+  return taskList.value.filter((t: any) => !LITERARY_TYPES.has(t.literary_type || 'general'))
+})
+
+const TYPE_LABELS: Record<string, string> = {
+  poetry: '诗歌', prose: '散文', novel: '小说', drama: '戏剧', general: '一般',
+  tech: '科技', business: '商业', trade: '贸易', legal: '法律', medical: '医学',
+}
+const getTypeName = (type: string) => TYPE_LABELS[type] || type
+const isLiteraryType = (type: string) => LITERARY_TYPES.has(type || 'general')
 
 const newTaskForm = ref({
   title: '',
@@ -414,7 +465,8 @@ const selectTask = async (task: any) => {
 }
 
 const createNewTask = () => {
-  newTaskForm.value = { title: '', source_text: '', source_lang: 'en', target_lang: 'zh', literary_type: 'general', user_requirements: '' }
+  const defaultType = categoryGroup.value === 'professional' ? 'tech' : 'general'
+  newTaskForm.value = { title: '', source_text: '', source_lang: 'en', target_lang: 'zh', literary_type: defaultType, user_requirements: '' }
   showCreateDialog.value = true
 }
 
@@ -516,7 +568,7 @@ const isTaskRunning = (status: string) => ['translating', 'verifying', 'revising
 
 const enterBatchMode = () => {
   batchMode.value = true
-  selectedTaskIds.value = taskList.value
+  selectedTaskIds.value = filteredTaskList.value
     .filter((t: any) => !isTaskRunning(t.status))
     .filter((t: any) => t.status === 'pending' || t.status === 'failed')
     .map((t: any) => t.id)
@@ -671,7 +723,7 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 
 /* ===== 侧边栏 ===== */
 .sidebar {
-  width: 240px;
+  width: 280px;
   background: #fff;
   border-right: 1px solid #e8e8e8;
   display: flex;
@@ -680,16 +732,29 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 }
 
 .sidebar-header {
-  padding: 14px 16px;
+  padding: 16px 18px;
   border-bottom: 1px solid #f0f0f0;
   display: flex;
   justify-content: space-between;
   align-items: center;
 
+  .brand-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
   .brand {
-    font-size: 16px;
+    font-size: 18px;
     font-weight: 700;
     color: #1d1d1f;
+    line-height: 1.2;
+  }
+
+  .brand-sub {
+    font-size: 11px;
+    color: #b0b0b0;
+    font-weight: 400;
   }
 
   .header-btns {
@@ -699,17 +764,36 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   }
 }
 
+.category-filter {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+
+  .category-group {
+    width: 100%;
+    display: flex;
+
+    :deep(.el-radio-button) {
+      flex: 1;
+    }
+
+    :deep(.el-radio-button__inner) {
+      width: 100%;
+    }
+  }
+}
+
 .task-list {
   flex: 1;
   overflow-y: auto;
-  padding: 6px;
+  padding: 8px;
 }
 
 .task-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 10px 12px;
+  gap: 6px;
+  padding: 12px 14px;
   border-radius: 8px;
   cursor: pointer;
   margin-bottom: 2px;
@@ -722,8 +806,8 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   .task-checkbox { margin-right: 4px; flex-shrink: 0; }
 
   .task-info { flex: 1; min-width: 0; }
-  .task-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: #999; }
+  .task-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 12px; color: #999; }
 
   .task-actions { opacity: 0; transition: opacity 0.15s; flex-shrink: 0; display: flex; gap: 2px; }
   &:hover .task-actions { opacity: 1; }
@@ -759,9 +843,9 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
       h2 { color: #409eff; }
     }
 
-    .empty-icon { font-size: 40px; color: #bfbfbf; transition: color 0.2s; }
-    h2 { margin: 12px 0 4px; font-size: 16px; font-weight: 600; color: #303133; transition: color 0.2s; }
-    p { margin: 0; font-size: 13px; color: #999; }
+    .empty-icon { font-size: 44px; color: #bfbfbf; transition: color 0.2s; }
+    h2 { margin: 12px 0 6px; font-size: 18px; font-weight: 600; color: #303133; transition: color 0.2s; }
+    p { margin: 0; font-size: 14px; color: #999; }
   }
 }
 
@@ -774,7 +858,7 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 }
 
 .top-bar {
-  padding: 20px 16px;
+  padding: 12px 20px;
   background: #fff;
   border-bottom: 1px solid #e8e8e8;
   display: flex;
@@ -785,11 +869,11 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   .bar-left, .bar-right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
 
-  .lang-sel { width: 90px; }
-  .arrow { color: #bfbfbf; font-size: 12px; }
+  .lang-sel { width: 100px; }
+  .arrow { color: #bfbfbf; font-size: 13px; }
 }
 
 .step-dots {
@@ -803,13 +887,13 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
     gap: 4px;
     padding: 3px 8px;
     border-radius: 10px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     transition: all 0.25s;
 
     .dot {
-      width: 7px;
-      height: 7px;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
       flex-shrink: 0;
       transition: all 0.25s;
@@ -847,8 +931,8 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   .score-row {
     display: flex;
     justify-content: space-between;
-    padding: 4px 0;
-    font-size: 13px;
+    padding: 5px 0;
+    font-size: 14px;
     & + .score-row { border-top: 1px solid #f5f5f5; }
   }
 }
@@ -869,12 +953,12 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 }
 
 .panel-header {
-  padding: 8px 16px;
+  padding: 10px 20px;
   border-bottom: 1px solid #f0f0f0;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: #606266;
   background: #fafafa;
@@ -885,14 +969,14 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px;
 
   pre {
     margin: 0;
     white-space: pre-wrap;
     font-family: inherit;
-    font-size: 14px;
-    line-height: 1.8;
+    font-size: 15px;
+    line-height: 1.85;
     color: #303133;
   }
 }
@@ -914,13 +998,13 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   }
 
   .para-source {
-    font-size: 13px;
+    font-size: 14px;
     color: #909399;
-    padding: 6px 8px;
+    padding: 8px 10px;
     background: #f5f7fa;
     border-radius: 4px;
-    margin-bottom: 8px;
-    line-height: 1.6;
+    margin-bottom: 10px;
+    line-height: 1.7;
     white-space: pre-wrap;
   }
 }
@@ -928,8 +1012,8 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 .no-content {
   color: #bfbfbf;
   text-align: center;
-  padding: 40px 0;
-  font-size: 14px;
+  padding: 48px 0;
+  font-size: 15px;
 }
 
 .inline-upload {

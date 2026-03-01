@@ -108,12 +108,21 @@
         </div>
         <div class="panel-footer">
           <div class="footer-left">
-            <el-select v-model="selectedLiteraryType" placeholder="选择文学类型" size="small" style="width: 140px;">
-              <el-option label="一般文学" value="general" />
-              <el-option label="诗歌" value="poetry" />
-              <el-option label="散文" value="prose" />
-              <el-option label="小说" value="novel" />
-              <el-option label="戏剧" value="drama" />
+            <el-select v-model="selectedLiteraryType" placeholder="翻译类型" size="small" style="width: 140px;">
+              <el-option-group label="文学">
+                <el-option label="一般" value="general" />
+                <el-option label="诗歌" value="poetry" />
+                <el-option label="散文" value="prose" />
+                <el-option label="小说" value="novel" />
+                <el-option label="戏剧" value="drama" />
+              </el-option-group>
+              <el-option-group label="专业">
+                <el-option label="科技" value="tech" />
+                <el-option label="商业" value="business" />
+                <el-option label="贸易" value="trade" />
+                <el-option label="法律" value="legal" />
+                <el-option label="医学" value="medical" />
+              </el-option-group>
             </el-select>
           </div>
           <div class="footer-right">

@@ -60,14 +60,23 @@
         <el-form-item label="翻译">
           <el-input v-model="termForm.target_term" placeholder="输入目标语言翻译" />
         </el-form-item>
-        <el-form-item label="文学类型">
-          <el-radio-group v-model="termForm.literary_type">
-            <el-radio-button label="general">一般</el-radio-button>
-            <el-radio-button label="poetry">诗歌</el-radio-button>
-            <el-radio-button label="prose">散文</el-radio-button>
-            <el-radio-button label="novel">小说</el-radio-button>
-            <el-radio-button label="drama">戏剧</el-radio-button>
-          </el-radio-group>
+        <el-form-item label="翻译类型">
+          <el-select v-model="termForm.literary_type" style="width: 100%;">
+            <el-option-group label="文学">
+              <el-option label="一般" value="general" />
+              <el-option label="诗歌" value="poetry" />
+              <el-option label="散文" value="prose" />
+              <el-option label="小说" value="novel" />
+              <el-option label="戏剧" value="drama" />
+            </el-option-group>
+            <el-option-group label="专业">
+              <el-option label="科技" value="tech" />
+              <el-option label="商业" value="business" />
+              <el-option label="贸易" value="trade" />
+              <el-option label="法律" value="legal" />
+              <el-option label="医学" value="medical" />
+            </el-option-group>
+          </el-select>
         </el-form-item>
         <el-form-item label="分类">
           <el-input v-model="termForm.category" placeholder="可选：词汇分类，如修辞手法、文化词汇等" />

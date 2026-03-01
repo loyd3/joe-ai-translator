@@ -84,12 +84,19 @@ class LanguageInfo(BaseModel):
 # ============================================================
 
 class LiteraryType(str, Enum):
-    """文学类型"""
+    """翻译类型"""
+    # 文学类
     POETRY = "poetry"       # 诗歌
     PROSE = "prose"         # 散文
     NOVEL = "novel"         # 小说
     DRAMA = "drama"         # 戏剧
     GENERAL = "general"     # 一般文学
+    # 专业类
+    TECH = "tech"           # 科技
+    BUSINESS = "business"   # 商业
+    TRADE = "trade"         # 贸易
+    LEGAL = "legal"         # 法律
+    MEDICAL = "medical"     # 医学
 
 
 class DocType(str, Enum):

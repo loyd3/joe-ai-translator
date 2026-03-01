@@ -110,14 +110,21 @@ class AIClient:
         "uk": "乌克兰语",
     }
     
-    # 文学类型描述
+    # 翻译类型描述
     LITERARY_TYPES = {
         "poetry": "诗歌",
-        "prose": "散文", 
+        "prose": "散文",
         "novel": "小说",
         "drama": "戏剧",
-        "general": "一般文学作品"
+        "general": "一般文学作品",
+        "tech": "科技文档",
+        "business": "商业文档",
+        "trade": "贸易文档",
+        "legal": "法律文书",
+        "medical": "医学文献",
     }
+
+    PROFESSIONAL_TYPES = {"tech", "business", "trade", "legal", "medical"}
 
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
@@ -166,8 +173,11 @@ class AIClient:
         return self.SUPPORTED_LANGUAGES.get(code, code)
     
     def get_literary_type_name(self, lit_type: str) -> str:
-        """获取文学类型名称"""
+        """获取翻译类型名称"""
         return self.LITERARY_TYPES.get(lit_type, "一般文学作品")
+
+    def is_professional_type(self, lit_type: str) -> bool:
+        return lit_type in self.PROFESSIONAL_TYPES
 
     def build_translation_prompt(self, text: str, source_lang: str, target_lang: str, context: Optional[str] = None) -> list:
         """构建翻译提示词"""
@@ -241,6 +251,32 @@ Output only the translated text, no additional comments."""
     # 文学翻译专用方法
     # ============================================================
     
+    def _build_professional_domain_notes(self, literary_type: str) -> str:
+        """为专业类型生成领域特定的翻译注意事项"""
+        domain_notes = {
+            "tech": """- 技术术语必须使用行业标准译法，不可随意意译
+- 代码片段、API名称、产品名称等保留原文
+- 数字、单位、公式必须准确无误
+- 语言简洁精确，避免冗余修饰""",
+            "business": """- 商业术语（如ROI、KPI、B2B等）使用通用商业译法
+- 保留品牌名、公司名的原文或约定俗成的译名
+- 语气正式专业，符合商务沟通惯例
+- 数据、百分比、财务数字必须准确""",
+            "trade": """- 贸易术语（如FOB、CIF、L/C等）使用国际贸易标准译法
+- 法律和合同相关条款措辞严谨准确
+- 保留国际通用的贸易代码和标准编号
+- 注意各国/地区贸易法规差异的表述""",
+            "legal": """- 法律术语必须使用目标语言法律体系中的对应概念
+- 合同条款、法规引用、判例引用需遵循法律文书规范
+- 措辞严谨，避免歧义，每个词都可能影响法律效力
+- 保留法律文书的格式和编号结构""",
+            "medical": """- 医学术语使用国际通用的标准译名（参考ICD、MeSH等）
+- 药品名称使用通用名（INN），必要时注明商品名
+- 剂量、检验指标、统计数据必须准确无误
+- 遵循医学文献的严谨表述习惯""",
+        }
+        return domain_notes.get(literary_type, "")
+
     def build_literary_translation_prompt(
         self, 
         text: str, 
@@ -250,14 +286,41 @@ Output only the translated text, no additional comments."""
         reference_content: Optional[str] = None
     ) -> list:
         """
-        构建文学翻译提示词 - 第一步：初译
-        强调三美原则：音美、词美、意美
+        构建翻译提示词 - 第一步：初译
+        文学类使用三美原则，专业类使用领域规范
         """
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
         lit_type_name = self.get_literary_type_name(literary_type)
-        
-        system_prompt = f"""你是一位精通{source_name}和{target_name}的翻译大师，擅长{lit_type_name}翻译。
+
+        if self.is_professional_type(literary_type):
+            domain_notes = self._build_professional_domain_notes(literary_type)
+            system_prompt = f"""你是一位精通{source_name}和{target_name}的{lit_type_name}翻译专家。
+
+## 翻译原则
+
+### 1. 术语准确
+- 专业术语必须使用目标语言中的标准译法，不可臆造
+- 对于没有公认译法的新术语，可保留原文或采用"译文（原文）"格式
+
+### 2. 领域规范
+{domain_notes}
+
+### 3. 表达要求
+- 语言精练、逻辑清晰，符合{lit_type_name}的行文规范
+- 句式结构符合目标语言的专业文体习惯
+- 确保信息完整传达，不遗漏任何技术细节
+- 避免翻译腔，读起来像目标语言的原生{lit_type_name}
+
+### 4. 格式保留
+- 保持原文的段落、列表、标题等格式结构
+- 保留数字、公式、编号等特殊内容
+
+## 输出格式
+
+请直接输出译文，不要添加解释或评论。保持原文的段落和格式结构。"""
+        else:
+            system_prompt = f"""你是一位精通{source_name}和{target_name}的翻译大师，擅长{lit_type_name}翻译。
 
 ## 第一原则：以原文风格为准
 
@@ -320,17 +383,15 @@ Output only the translated text, no additional comments."""
         literary_type: str = "general",
         reference_content: Optional[str] = None,
     ) -> str:
-        """
-        文学翻译 - 第一步：初译
-        """
+        """翻译 - 第一步：初译"""
         messages = self.build_literary_translation_prompt(
             text, source_lang, target_lang, literary_type, reference_content
         )
-        
+        temp = 0.4 if self.is_professional_type(literary_type) else 0.7
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=0.7,  # 文学翻译需要更多创造性
+            temperature=temp,
             max_tokens=self.settings.ai_max_tokens,
         )
         return response.choices[0].message.content.strip()
@@ -343,14 +404,57 @@ Output only the translated text, no additional comments."""
         target_lang: str,
         literary_type: str = "general",
     ) -> dict:
-        """
-        文学翻译 - 第二步：校验
-        检查翻译的准确性、完整性和三美原则的体现
-        """
+        """翻译 - 第二步：校验"""
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
-        
-        system_prompt = f"""你是一位严谨的翻译审校专家。请对以下{self.get_literary_type_name(literary_type)}翻译进行全面的校验评估。
+        lit_type_name = self.get_literary_type_name(literary_type)
+
+        if self.is_professional_type(literary_type):
+            domain_notes = self._build_professional_domain_notes(literary_type)
+            system_prompt = f"""你是一位严谨的{lit_type_name}翻译审校专家。请对以下翻译进行全面的校验评估。
+
+## 校验维度
+
+### 1. 术语准确性（最高优先级）
+- 专业术语是否使用了目标语言中的标准译法
+- 是否存在术语翻译不一致的情况
+- 新术语的处理方式是否恰当
+
+### 2. 信息完整性
+- 是否存在漏译、错译或增译
+- 数字、数据、公式是否准确无误
+- 逻辑关系和因果链是否清晰
+
+### 3. 领域规范
+{domain_notes}
+
+### 4. 质量评分（0-10分）
+- **术语准确度** (beauty_sound_score)：专业术语的翻译准确程度
+- **表达规范度** (beauty_word_score)：是否符合{lit_type_name}的行文规范
+- **信息完整度** (beauty_meaning_score)：原文信息的完整传达程度
+
+### 5. 自然度
+- 是否有翻译腔
+- 是否符合目标语言{lit_type_name}的行文习惯
+
+## 输出格式
+
+请以JSON格式输出，包含以下字段：
+{{
+    "verified_translation": "经过校验和微调后的译文",
+    "accuracy_analysis": "准确性分析",
+    "beauty_sound_score": 8.5,
+    "beauty_sound_comment": "术语准确度评价",
+    "beauty_word_score": 8.0,
+    "beauty_word_comment": "表达规范度评价",
+    "beauty_meaning_score": 9.0,
+    "beauty_meaning_comment": "信息完整度评价",
+    "style_analysis": "领域规范符合度分析",
+    "issues_found": ["问题1", "问题2"],
+    "suggestions": ["建议1", "建议2"]
+}}"""
+        else:
+            system_prompt = f"""你是一位严谨的翻译审校专家。请对以下{lit_type_name}翻译进行全面的校验评估。
 
 ## 校验维度
 
@@ -450,7 +554,41 @@ Output only the translated text, no additional comments."""
         issues = verification_analysis.get("issues_found", [])
         suggestions = verification_analysis.get("suggestions", [])
         
-        system_prompt = f"""你是一位追求精准的翻译修订专家。请根据校验反馈，对译文进行针对性修改和润色。
+        if self.is_professional_type(literary_type):
+            lit_type_name = self.get_literary_type_name(literary_type)
+            system_prompt = f"""你是一位{lit_type_name}领域的翻译修订专家。请根据校验反馈，对译文进行针对性修改和完善。
+
+## 修改原则
+
+### 1. 术语修正（最优先）
+- 修正校验中发现的术语翻译错误
+- 确保全文术语使用一致
+- 对不确定的术语采用"译文（原文）"格式
+
+### 2. 表达优化
+- 提升行文的专业性和规范性
+- 确保逻辑清晰、层次分明
+- 消除翻译腔和冗余表达
+- 使译文符合目标语言{lit_type_name}的行文惯例
+
+### 3. 针对性改进
+- 针对校验中发现的具体问题进行修正
+- 根据评分，重点提升得分较低的方面
+- 确保数字、数据、引用的准确性
+
+## 输出格式
+
+请以JSON格式输出，包含以下字段：
+{{
+    "revised_translation": "修改后的译文",
+    "revision_summary": "修改总结",
+    "key_improvements": ["改进点1", "改进点2"],
+    "beauty_sound_enhancement": "术语准确度提升说明",
+    "beauty_word_enhancement": "表达规范度提升说明",
+    "beauty_meaning_enhancement": "信息完整度提升说明"
+}}"""
+        else:
+            system_prompt = f"""你是一位追求精准的翻译修订专家。请根据校验反馈，对译文进行针对性修改和润色。
 
 ## 修改原则
 
@@ -528,7 +666,47 @@ Output only the translated text, no additional comments."""
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
         
-        system_prompt = f"""你是一位资深的翻译定稿专家。你将收到完整的原文和译文（之前是分段翻译的），请从全篇角度进行最后的审校和润色，确保达到出版品质。
+        if self.is_professional_type(literary_type):
+            lit_type_name = self.get_literary_type_name(literary_type)
+            system_prompt = f"""你是一位资深的{lit_type_name}翻译定稿专家。你将收到完整的原文和译文（之前是分段翻译的），请从全篇角度进行最后的审校和定稿。
+
+## 定稿标准
+
+### 1. 全篇统一性（核心任务）
+- 统一全文的术语翻译，消除分段翻译造成的不一致
+- 同一术语、概念、名称在全文中保持统一译法
+- 确保段落之间的衔接自然，上下文逻辑连贯
+
+### 2. 术语与规范
+- 最终确认所有专业术语的翻译准确性
+- 确保数字、数据、引用、编号的准确性
+- 格式符合{lit_type_name}的排版规范
+
+### 3. 表达质量
+- 语言精练、逻辑清晰
+- 消除翻译腔和生硬表达
+- 读起来像目标语言的原生{lit_type_name}
+
+### 4. 完美准确
+- 零错误：无错译、漏译、增译
+- 细节到位：标点、格式、特殊内容处理得当
+
+## 输出格式
+
+请以JSON格式输出，包含以下字段：
+{{
+    "final_translation": "最终定稿译文（保持原文的段落划分，段落之间用两个换行符分隔）",
+    "final_assessment": "总体评价（术语一致性 + 全篇统一性 + 专业规范度）",
+    "beauty_sound_final": "术语准确度最终评价",
+    "beauty_word_final": "表达规范度最终评价",
+    "beauty_meaning_final": "信息完整度最终评价",
+    "publishing_readiness": "发布准备度评估",
+    "translator_note": "译者注（如有需要说明的特殊处理）"
+}}
+
+**重要：final_translation 中必须保持与原文相同的段落数量和段落划分，段落之间用两个换行符（\\n\\n）分隔。**"""
+        else:
+            system_prompt = f"""你是一位资深的翻译定稿专家。你将收到完整的原文和译文（之前是分段翻译的），请从全篇角度进行最后的审校和润色，确保达到出版品质。
 
 ## 定稿标准
 

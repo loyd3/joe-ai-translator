@@ -97,13 +97,22 @@
         </el-row>
         <el-row :gutter="12">
           <el-col :span="12">
-            <el-form-item label="文学类型">
+            <el-form-item label="翻译类型">
               <el-select v-model="termForm.literary_type" style="width: 100%;">
-                <el-option label="一般" value="general" />
-                <el-option label="诗歌" value="poetry" />
-                <el-option label="散文" value="prose" />
-                <el-option label="小说" value="novel" />
-                <el-option label="戏剧" value="drama" />
+                <el-option-group label="文学">
+                  <el-option label="一般" value="general" />
+                  <el-option label="诗歌" value="poetry" />
+                  <el-option label="散文" value="prose" />
+                  <el-option label="小说" value="novel" />
+                  <el-option label="戏剧" value="drama" />
+                </el-option-group>
+                <el-option-group label="专业">
+                  <el-option label="科技" value="tech" />
+                  <el-option label="商业" value="business" />
+                  <el-option label="贸易" value="trade" />
+                  <el-option label="法律" value="legal" />
+                  <el-option label="医学" value="medical" />
+                </el-option-group>
               </el-select>
             </el-form-item>
           </el-col>
@@ -293,7 +302,7 @@ onMounted(() => { loadTerms(); loadCategories() })
 }
 
 .term-row {
-  padding: 10px 12px;
+  padding: 12px 14px;
   border-radius: 8px;
   position: relative;
   transition: background 0.15s;
@@ -305,11 +314,11 @@ onMounted(() => { loadTerms(); loadCategories() })
   .term-pair {
     display: flex;
     align-items: baseline;
-    gap: 8px;
-    font-size: 14px;
+    gap: 10px;
+    font-size: 15px;
 
     .source { font-weight: 500; color: #303133; }
-    .sep { color: #c0c4cc; font-size: 12px; flex-shrink: 0; }
+    .sep { color: #c0c4cc; font-size: 13px; flex-shrink: 0; }
     .target { color: #409eff; font-weight: 500; }
   }
 
@@ -317,10 +326,10 @@ onMounted(() => { loadTerms(); loadCategories() })
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-top: 4px;
+    margin-top: 5px;
 
     .desc {
-      font-size: 12px;
+      font-size: 13px;
       color: #999;
       white-space: nowrap;
       overflow: hidden;
@@ -330,8 +339,8 @@ onMounted(() => { loadTerms(); loadCategories() })
 
   .term-actions {
     position: absolute;
-    top: 8px;
-    right: 8px;
+    top: 10px;
+    right: 10px;
     display: flex;
     gap: 2px;
     background: #f5f7fa;
@@ -341,9 +350,9 @@ onMounted(() => { loadTerms(); loadCategories() })
 }
 
 .panel-footer {
-  padding: 10px 0 0;
+  padding: 12px 0 0;
   border-top: 1px solid #f0f0f0;
-  font-size: 12px;
+  font-size: 13px;
   color: #999;
 }
 </style>

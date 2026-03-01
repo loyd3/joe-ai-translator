@@ -26,7 +26,7 @@
     <div class="result-meta" v-if="task">
       <span>{{ task.source_lang }} → {{ task.target_lang }}</span>
       <span class="meta-divider">|</span>
-      <span>文学类型：{{ task.literary_type }}</span>
+      <span>类型：{{ getTypeName(task.literary_type) }}</span>
     </div>
 
     <div class="result-body" v-loading="loading">
@@ -176,6 +176,12 @@ const doExport = async () => {
   }
 }
 
+const TYPE_LABELS: Record<string, string> = {
+  poetry: '诗歌', prose: '散文', novel: '小说', drama: '戏剧', general: '一般',
+  tech: '科技', business: '商业', trade: '贸易', legal: '法律', medical: '医学',
+}
+const getTypeName = (type: string) => TYPE_LABELS[type] || type
+
 const goBack = () => {
   router.push({ name: 'literary' })
 }
@@ -193,7 +199,7 @@ watch(id, load, { immediate: true })
 
 .result-header {
   background: #fff;
-  padding: 16px 24px;
+  padding: 18px 28px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -207,7 +213,7 @@ watch(id, load, { immediate: true })
 
     .title {
       margin: 0;
-      font-size: 18px;
+      font-size: 20px;
       font-weight: 600;
     }
   }
@@ -220,8 +226,8 @@ watch(id, load, { immediate: true })
 
 .result-meta {
   background: #fff;
-  padding: 8px 24px;
-  font-size: 13px;
+  padding: 10px 28px;
+  font-size: 14px;
   color: #909399;
   border-bottom: 1px solid #ebeef5;
 
@@ -234,7 +240,7 @@ watch(id, load, { immediate: true })
 .result-body {
   flex: 1;
   min-height: 0;
-  padding: 20px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
 }
@@ -266,7 +272,7 @@ watch(id, load, { immediate: true })
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 14px 18px;
+  padding: 14px 20px;
   border-bottom: 1px solid #e4e7ed;
   font-weight: 600;
   color: #303133;
@@ -274,7 +280,7 @@ watch(id, load, { immediate: true })
   background: #fafafa;
 
   .panel-label {
-    font-size: 15px;
+    font-size: 16px;
   }
 }
 
@@ -318,9 +324,9 @@ watch(id, load, { immediate: true })
     border: none;
     border-radius: 0;
     resize: none;
-    font-size: 14px;
+    font-size: 15px;
     line-height: 1.85;
-    padding: 16px 18px;
+    padding: 20px 22px;
     box-shadow: none;
     background: #fafafa;
   }

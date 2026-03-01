@@ -255,6 +255,7 @@ class ParagraphUpdateRequest(BaseModel):
 class LiteraryTranslationUpdate(BaseModel):
     """更新文学翻译任务请求"""
     title: Optional[str] = None
+    source_text: Optional[str] = None
     final_translation: Optional[str] = None
     status: Optional[str] = None  # 状态管理：pending, translating, verifying, revising, finalizing, completed, failed
 

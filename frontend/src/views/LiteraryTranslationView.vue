@@ -1,170 +1,159 @@
 <template>
   <div class="literary-view">
-    <!-- 左侧边栏：任务列表 -->
+    <!-- 侧边栏 -->
     <div class="sidebar">
       <div class="sidebar-header">
-        <h3>
-          <el-icon><Reading /></el-icon>
-          文学翻译
-        </h3>
-        <el-button type="primary" size="small" circle @click="createNewTask">
-          <el-icon><Plus /></el-icon>
-        </el-button>
+        <span class="brand">译智通</span>
+        <div class="header-btns">
+          <el-button v-if="batchMode" text size="small" @click="exitBatchMode">取消</el-button>
+          <el-button
+            v-if="batchMode && selectedTaskIds.length > 0"
+            type="primary"
+            size="small"
+            @click="startBatchWorkflow"
+            :loading="batchStarting"
+          >翻译 {{ selectedTaskIds.length }} 项</el-button>
+          <el-tooltip v-if="!batchMode" content="批量翻译" placement="top">
+            <el-button size="small" circle @click="enterBatchMode">
+              <el-icon><List /></el-icon>
+            </el-button>
+          </el-tooltip>
+          <el-button type="primary" size="small" circle @click="createNewTask">
+            <el-icon><Plus /></el-icon>
+          </el-button>
+        </div>
       </div>
 
       <div class="task-list" v-loading="loadingTasks">
         <div
           v-for="task in taskList"
           :key="task.id"
-          :class="['task-item', { active: currentTask?.id === task.id }]"
-          @click="selectTask(task)"
+          :class="['task-item', { active: !batchMode && currentTask?.id === task.id, selected: batchMode && selectedTaskIds.includes(task.id) }]"
+          @click="batchMode ? toggleTaskSelection(task.id) : selectTask(task)"
         >
+          <el-checkbox
+            v-if="batchMode"
+            :model-value="selectedTaskIds.includes(task.id)"
+            @click.stop
+            @change="toggleTaskSelection(task.id)"
+            class="task-checkbox"
+            :disabled="isTaskRunning(task.status)"
+          />
           <div class="task-info">
             <div class="task-title">{{ task.title || `任务 #${task.id}` }}</div>
             <div class="task-meta">
-              <el-tag size="small" :type="getStatusType(task.status)">
-                {{ getStatusText(task.status) }}
-              </el-tag>
+              <el-tag size="small" :type="getStatusType(task.status)">{{ getStatusText(task.status) }}</el-tag>
               <span class="task-lang">{{ task.source_lang }} → {{ task.target_lang }}</span>
             </div>
           </div>
-          <div class="task-actions" @click.stop>
-            <el-tooltip content="修改" placement="top">
-              <el-button link type="primary" size="small" circle @click="openEditTaskDialog(task)">
-                <el-icon><Edit /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="删除" placement="top">
-              <el-button link type="danger" size="small" circle @click="confirmDeleteTask(task)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </el-tooltip>
+          <div class="task-actions" v-if="!batchMode" @click.stop>
+            <el-button link size="small" @click="openEditTaskDialog(task)"><el-icon><Edit /></el-icon></el-button>
+            <el-button link type="danger" size="small" @click="confirmDeleteTask(task)"><el-icon><Delete /></el-icon></el-button>
           </div>
         </div>
-        <el-empty v-if="taskList.length === 0" description="暂无任务" :image-size="80" />
-      </div>
-
-      <div class="sidebar-footer">
-        <el-button @click="showTermLibrary = true" class="term-library-btn">
-          <el-icon><Collection /></el-icon>
-          专业词库
-        </el-button>
+        <el-empty v-if="taskList.length === 0" description="暂无任务" :image-size="60" />
       </div>
     </div>
 
     <!-- 主内容区 -->
     <div class="main-content">
-      <LiteraryTranslator v-if="!currentTask" @create-task="createNewTask" />
-      
+      <!-- 空状态 -->
+      <div v-if="!currentTask" class="empty-state" @click="createNewTask">
+        <div class="empty-card">
+          <el-icon class="empty-icon"><Plus /></el-icon>
+          <h2>创建翻译任务</h2>
+          <p>点击新建文学翻译任务</p>
+        </div>
+      </div>
+
+      <!-- 工作区 -->
       <template v-else>
-        <div class="translation-workspace">
-          <!-- 翻译编辑器组件 -->
-          <div class="editor-container">
-            <!-- 工具栏 -->
-            <div class="toolbar">
-              <div class="toolbar-left">
-                <el-select v-model="currentTask.source_lang" size="small" style="width: 100px;">
-                  <el-option v-for="lang in languages" :key="lang.code" :label="lang.name" :value="lang.code" />
-                </el-select>
-                <el-icon class="arrow"><ArrowRight /></el-icon>
-                <el-select v-model="currentTask.target_lang" size="small" style="width: 100px;">
-                  <el-option v-for="lang in targetLanguages" :key="lang.code" :label="lang.name" :value="lang.code" />
-                </el-select>
-              </div>
-              <div class="toolbar-right">
-                <el-button size="small" @click="showTermLibrary = true">
-                  <el-icon><Collection /></el-icon>
-                  词库
-                </el-button>
-              </div>
-            </div>
+        <div class="workspace">
+          <!-- 顶栏 -->
+          <div class="top-bar">
+            <div class="bar-left">
+              <el-select v-model="currentTask.source_lang" size="small" class="lang-sel">
+                <el-option v-for="lang in languages" :key="lang.code" :label="lang.name" :value="lang.code" />
+              </el-select>
+              <el-icon class="arrow"><ArrowRight /></el-icon>
+              <el-select v-model="currentTask.target_lang" size="small" class="lang-sel">
+                <el-option v-for="lang in targetLanguages" :key="lang.code" :label="lang.name" :value="lang.code" />
+              </el-select>
 
-            <!-- 工作流步骤 -->
-            <div class="workflow-progress">
-              <el-steps :active="currentStep" finish-status="success" simple>
-                <el-step title="翻译" />
-                <el-step title="校验" />
-                <el-step title="修改" />
-                <el-step title="定稿" />
-              </el-steps>
-              <div class="step-action">
-                <el-button v-if="currentTask.status === 'pending'" type="primary" size="small" @click="startWorkflow" :loading="processing">
-                  开始翻译
-                </el-button>
-                <el-button v-else-if="currentTask.current_step === 1" type="primary" size="small" @click="startWorkflow" :loading="processing">
-                  执行翻译
-                </el-button>
-                <el-button v-else-if="currentTask.current_step === 2" type="primary" size="small" @click="verifyTranslation" :loading="processing">
-                  执行校验
-                </el-button>
-                <el-button v-else-if="currentTask.current_step === 3" type="primary" size="small" @click="reviseTranslation" :loading="processing">
-                  执行修改
-                </el-button>
-                <el-button v-else-if="currentTask.current_step === 4" type="primary" size="small" @click="finalizeTranslation" :loading="processing">
-                  执行定稿
-                </el-button>
-                <el-tag v-else-if="currentTask.status === 'completed'" type="success">已完成</el-tag>
-              </div>
-            </div>
+              <el-divider direction="vertical" />
 
-            <!-- 三美评分 -->
-            <div class="beauty-scores" v-if="hasBeautyScores">
-              <div class="score-item">
-                <span>音美</span>
-                <el-progress :percentage="beautyScores.sound" :color="getScoreColor(beautyScores.sound)" />
-                <span>{{ beautyScores.sound.toFixed(1) }}</span>
-              </div>
-              <div class="score-item">
-                <span>词美</span>
-                <el-progress :percentage="beautyScores.word" :color="getScoreColor(beautyScores.word)" />
-                <span>{{ beautyScores.word.toFixed(1) }}</span>
-              </div>
-              <div class="score-item">
-                <span>意美</span>
-                <el-progress :percentage="beautyScores.meaning" :color="getScoreColor(beautyScores.meaning)" />
-                <span>{{ beautyScores.meaning.toFixed(1) }}</span>
-              </div>
-            </div>
-
-            <!-- 编辑区域 -->
-            <div class="edit-area">
-              <div class="source-box">
-                <div class="box-header">
-                  <span>原文</span>
-                  <el-tag size="small">{{ currentTask.source_lang }}</el-tag>
+              <div class="step-dots">
+                <div v-for="(s, i) in stepItems" :key="i" :class="['dot-item', s.state]">
+                  <span class="dot" />
+                  <span class="dot-label">{{ s.label }}</span>
                 </div>
-                <pre class="box-content">{{ currentTask.source_text }}</pre>
               </div>
-              <div class="translation-box">
-                <div class="box-header">
-                  <span>{{ getStepLabel(displayStep) }}</span>
-                  <el-radio-group v-model="displayStep" size="small">
-                    <el-radio-button :label="1">初译</el-radio-button>
-                    <el-radio-button :label="2" :disabled="!step2Available">校验</el-radio-button>
-                    <el-radio-button :label="3" :disabled="!step3Available">修改</el-radio-button>
-                    <el-radio-button :label="4" :disabled="!step4Available">定稿</el-radio-button>
-                  </el-radio-group>
+
+              <el-button v-if="canStartWorkflow" type="primary" size="small" @click="startWorkflow" :loading="processing">
+                {{ currentTask.status === 'failed' ? '重新翻译' : '开始翻译' }}
+              </el-button>
+              <el-button v-else-if="isWorkflowRunning" type="primary" size="small" loading disabled>
+                {{ getStatusText(currentTask.status) }}
+              </el-button>
+              <el-tag v-else-if="currentTask.status === 'completed'" type="success" size="small" effect="dark" round>已完成</el-tag>
+            </div>
+
+            <div class="bar-right">
+              <el-popover v-if="hasBeautyScores" placement="bottom" :width="200" trigger="hover">
+                <template #reference>
+                  <el-button size="small" link>
+                    三美评分
+                  </el-button>
+                </template>
+                <div class="score-popover">
+                  <div class="score-row"><span>音美</span><span>{{ beautyScores.sound.toFixed(1) }}</span></div>
+                  <div class="score-row"><span>词美</span><span>{{ beautyScores.word.toFixed(1) }}</span></div>
+                  <div class="score-row"><span>意美</span><span>{{ beautyScores.meaning.toFixed(1) }}</span></div>
                 </div>
-                <div class="box-content">
+              </el-popover>
+              <el-button size="small" @click="goToResultPage">
+                <el-icon><Document /></el-icon>
+                定稿
+              </el-button>
+              <el-button size="small" @click="showTermLibrary = true">
+                <el-icon><Collection /></el-icon>
+                词库
+              </el-button>
+            </div>
+          </div>
+
+          <!-- 编辑区 -->
+          <div class="edit-area">
+            <div class="panel source-panel">
+              <div class="panel-header">
+                <span>原文</span>
+                <el-tag size="small" type="info">{{ currentTask.source_lang }}</el-tag>
+              </div>
+              <div class="panel-body">
+                <pre>{{ currentTask.source_text }}</pre>
+              </div>
+            </div>
+            <div class="panel trans-panel">
+              <div class="panel-header">
+                <span>{{ getStepLabel(displayStep) }}</span>
+                <el-radio-group v-model="displayStep" size="small">
+                  <el-radio-button :label="1">初译</el-radio-button>
+                  <el-radio-button :label="2" :disabled="!step2Available">校验</el-radio-button>
+                  <el-radio-button :label="3" :disabled="!step3Available">修改</el-radio-button>
+                  <el-radio-button :label="4" :disabled="!step4Available">定稿</el-radio-button>
+                </el-radio-group>
+              </div>
+              <div class="panel-body">
+                <div v-for="para in paragraphs" :key="para.id" class="para-item">
+                  <div class="para-source">{{ para.source_text }}</div>
                   <el-input
-                    v-if="isEditing"
-                    v-model="editableText"
+                    v-model="para.editedText"
                     type="textarea"
-                    :rows="15"
+                    :autosize="{ minRows: 2 }"
+                    @blur="saveParagraph(para)"
                   />
-                  <template v-else>
-                    <div v-for="para in paragraphs" :key="para.id" class="para-item">
-                      <div class="para-num">段落 {{ para.paragraph_index + 1 }}</div>
-                      <div class="para-source">{{ para.source_text }}</div>
-                      <el-input
-                        v-model="para.editedText"
-                        type="textarea"
-                        :rows="2"
-                        @blur="saveParagraph(para)"
-                      />
-                    </div>
-                  </template>
                 </div>
+                <div v-if="paragraphs.length === 0" class="no-content">暂无翻译内容</div>
               </div>
             </div>
           </div>
@@ -172,8 +161,8 @@
       </template>
     </div>
 
-    <!-- 专业词库侧边栏 -->
-    <el-drawer v-model="showTermLibrary" title="专业词库" size="450px">
+    <!-- 抽屉 & 弹窗 -->
+    <el-drawer v-model="showTermLibrary" title="专业词库" size="420px">
       <TermLibraryPanel
         :literary-type="currentTask?.literary_type"
         :source-lang="currentTask?.source_lang"
@@ -181,12 +170,11 @@
       />
     </el-drawer>
 
-    <!-- 导出对话框 -->
-    <el-dialog v-model="showExport" title="导出译文" width="480px">
+    <el-dialog v-model="showExport" title="导出译文" width="440px">
       <el-form label-position="top">
-        <el-form-item label="选择格式">
+        <el-form-item label="格式">
           <el-radio-group v-model="exportFormat">
-            <el-radio-button label="txt">纯文本</el-radio-button>
+            <el-radio-button label="txt">TXT</el-radio-button>
             <el-radio-button label="md">Markdown</el-radio-button>
             <el-radio-button label="html">HTML</el-radio-button>
             <el-radio-button label="json">JSON</el-radio-button>
@@ -203,41 +191,46 @@
       </template>
     </el-dialog>
 
-    <!-- 新建任务对话框 -->
-    <el-dialog v-model="showCreateDialog" title="新建翻译任务" width="640px" destroy-on-close>
+    <el-dialog v-model="showCreateDialog" title="新建翻译任务" width="600px" destroy-on-close>
       <el-form :model="newTaskForm" label-position="top">
-        <el-form-item label="任务标题（选填）">
-          <el-input v-model="newTaskForm.title" placeholder="如：第一章" maxlength="200" show-word-limit clearable />
-        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="标题（选填）">
+              <el-input v-model="newTaskForm.title" placeholder="如：第一章" maxlength="200" clearable />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="文学类型">
+              <el-select v-model="newTaskForm.literary_type" style="width: 100%;">
+                <el-option label="一般" value="general" />
+                <el-option label="诗歌" value="poetry" />
+                <el-option label="散文" value="prose" />
+                <el-option label="小说" value="novel" />
+                <el-option label="戏剧" value="drama" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="源语言">
-              <el-select v-model="newTaskForm.source_lang" placeholder="源语言" style="width: 100%;">
+              <el-select v-model="newTaskForm.source_lang" style="width: 100%;">
                 <el-option v-for="lang in languages" :key="lang.code" :label="lang.name" :value="lang.code" />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="目标语言">
-              <el-select v-model="newTaskForm.target_lang" placeholder="目标语言" style="width: 100%;">
+              <el-select v-model="newTaskForm.target_lang" style="width: 100%;">
                 <el-option v-for="lang in targetLanguages" :key="lang.code" :label="lang.name" :value="lang.code" />
               </el-select>
             </el-form-item>
           </el-col>
         </el-row>
-        <el-form-item label="文学类型">
-          <el-radio-group v-model="newTaskForm.literary_type">
-            <el-radio-button label="general">一般</el-radio-button>
-            <el-radio-button label="poetry">诗歌</el-radio-button>
-            <el-radio-button label="prose">散文</el-radio-button>
-            <el-radio-button label="novel">小说</el-radio-button>
-            <el-radio-button label="drama">戏剧</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
         <el-form-item label="翻译需求（选填）">
           <el-input v-model="newTaskForm.user_requirements" type="textarea" :rows="2" placeholder="如：偏书面语、保留专有名词原文、统一某术语译法等" maxlength="500" show-word-limit />
         </el-form-item>
-        <el-form-item label="上传文件">
+        <el-form-item label="原文">
           <el-upload
             :auto-upload="false"
             :show-file-list="true"
@@ -245,15 +238,14 @@
             :limit="1"
             :on-change="onCreateFileSelect"
             :on-exceed="() => ElMessage.warning('仅支持一个文件')"
+            class="inline-upload"
           >
-            <el-button type="default" size="small">
+            <el-button size="small" link type="primary">
               <el-icon><Upload /></el-icon>
-              选择文件（txt / docx / pdf / mobi 等）
+              上传文件
             </el-button>
           </el-upload>
-        </el-form-item>
-        <el-form-item label="原文">
-          <el-input v-model="newTaskForm.source_text" type="textarea" :rows="8" placeholder="粘贴要翻译的文本，或通过上方上传文件填入..." />
+          <el-input v-model="newTaskForm.source_text" type="textarea" :rows="8" placeholder="粘贴要翻译的文本，或上传文件自动填入..." />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -262,18 +254,14 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showEditTask" title="修改任务" width="420px" destroy-on-close>
+    <el-dialog v-model="showEditTask" title="修改任务" width="400px" destroy-on-close>
       <el-form v-if="editingTask" label-position="top">
-        <el-form-item label="任务标题">
-          <el-input v-model="editForm.title" placeholder="选填" maxlength="200" show-word-limit />
+        <el-form-item label="标题">
+          <el-input v-model="editForm.title" placeholder="选填" maxlength="200" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="editForm.status" placeholder="状态" style="width: 100%;">
+          <el-select v-model="editForm.status" style="width: 100%;">
             <el-option label="待开始" value="pending" />
-            <el-option label="翻译中" value="translating" />
-            <el-option label="校验中" value="verifying" />
-            <el-option label="修改中" value="revising" />
-            <el-option label="定稿中" value="finalizing" />
             <el-option label="已完成" value="completed" />
             <el-option label="失败" value="failed" />
           </el-select>
@@ -288,12 +276,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Upload } from '@element-plus/icons-vue'
+import { Edit, Delete, Upload, Document, Plus, List } from '@element-plus/icons-vue'
 import { literaryApi, translateApi } from '@/api'
 import TermLibraryPanel from '@/components/TermLibraryPanel.vue'
-import LiteraryTranslator from '@/components/LiteraryTranslator.vue'
 
 const languages = ref<{ code: string; name: string }[]>([])
 const taskList = ref<any[]>([])
@@ -310,11 +298,12 @@ const showEditTask = ref(false)
 const editingTask = ref<any>(null)
 const editForm = ref({ title: '', status: '' })
 const displayStep = ref(1)
-const isEditing = ref(false)
-const editableText = ref('')
-
 const exportFormat = ref('txt')
 const exportWithSource = ref(false)
+
+const batchMode = ref(false)
+const selectedTaskIds = ref<number[]>([])
+const batchStarting = ref(false)
 
 const newTaskForm = ref({
   title: '',
@@ -326,10 +315,46 @@ const newTaskForm = ref({
 })
 const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
 
+const router = useRouter()
 const targetLanguages = computed(() => languages.value.filter(l => l.code !== 'auto'))
-const currentStep = computed(() => currentTask.value?.current_step || 0)
-const hasBeautyScores = computed(() => currentTask.value?.beauty_sound_score != null)
 
+const currentStep = computed(() => {
+  const task = currentTask.value
+  if (!task) return 0
+  if (task.status === 'completed') return 4
+  return Math.max(0, (task.current_step || 1) - 1)
+})
+
+const canStartWorkflow = computed(() => {
+  const s = currentTask.value?.status
+  return s === 'pending' || s === 'failed'
+})
+
+const isWorkflowRunning = computed(() =>
+  ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
+)
+
+const stepItems = computed(() => {
+  const labels = ['翻译', '校验', '修改', '定稿']
+  const statusMap: Record<string, number> = { translating: 0, verifying: 1, revising: 2, finalizing: 3 }
+  const active = currentStep.value
+  const runningIdx = statusMap[currentTask.value?.status] ?? -1
+
+  return labels.map((label, i) => {
+    let state = 'pending'
+    if (i < active) state = 'done'
+    else if (i === runningIdx) state = 'running'
+    else if (currentTask.value?.status === 'completed') state = 'done'
+    else if (currentTask.value?.status === 'failed' && i <= runningIdx) state = 'failed'
+    return { label, state }
+  })
+})
+
+const goToResultPage = () => {
+  if (currentTask.value?.id) router.push({ name: 'literary-result', params: { id: String(currentTask.value.id) } })
+}
+
+const hasBeautyScores = computed(() => currentTask.value?.beauty_sound_score != null)
 const beautyScores = computed(() => ({
   sound: (currentTask.value?.beauty_sound_score || 0) * 10,
   word: (currentTask.value?.beauty_word_score || 0) * 10,
@@ -340,9 +365,10 @@ const step2Available = computed(() => currentTask.value?.step2_verification)
 const step3Available = computed(() => currentTask.value?.step3_revision)
 const step4Available = computed(() => currentTask.value?.step4_finalization)
 
-onMounted(() => {
+onMounted(async () => {
   loadLanguages()
-  loadTasks()
+  await loadTasks(true)
+  if (taskList.value.some((t: any) => isTaskRunning(t.status))) startBatchPolling()
 })
 
 const loadLanguages = async () => {
@@ -354,11 +380,14 @@ const loadLanguages = async () => {
   }
 }
 
-const loadTasks = async () => {
+const loadTasks = async (autoSelect = false) => {
   loadingTasks.value = true
   try {
     const response = await literaryApi.listTranslations({ limit: 50 })
     taskList.value = response.data
+    if (autoSelect && taskList.value.length > 0 && !currentTask.value) {
+      await selectTask(taskList.value[0])
+    }
   } catch (error) {
     ElMessage.error('加载任务列表失败')
   } finally {
@@ -367,6 +396,7 @@ const loadTasks = async () => {
 }
 
 const selectTask = async (task: any) => {
+  stopPolling()
   try {
     const response = await literaryApi.getTranslation(task.id, true)
     currentTask.value = response.data
@@ -375,20 +405,16 @@ const selectTask = async (task: any) => {
       editedText: p.user_edited_text || p.translated_text || ''
     })) || []
     displayStep.value = currentTask.value.current_step || 1
+    if (isWorkflowRunning.value) {
+      startPolling()
+    }
   } catch (error) {
     ElMessage.error('加载任务失败')
   }
 }
 
 const createNewTask = () => {
-  newTaskForm.value = {
-    title: '',
-    source_text: '',
-    source_lang: 'en',
-    target_lang: 'zh',
-    literary_type: 'general',
-    user_requirements: ''
-  }
+  newTaskForm.value = { title: '', source_text: '', source_lang: 'en', target_lang: 'zh', literary_type: 'general', user_requirements: '' }
   showCreateDialog.value = true
 }
 
@@ -399,7 +425,7 @@ const onCreateFileSelect = async (opts: { raw: File }) => {
   if (!file) return
   const ext = file.name.split('.').pop()?.toLowerCase()
   if (!ext || !allowedUploadExtensions.has(ext)) {
-    ElMessage.warning('请选择支持的文件：txt、docx、pdf、mobi 或常见文本格式')
+    ElMessage.warning('请选择支持的文件格式')
     return
   }
   if (binaryUploadExtensions.has(ext)) {
@@ -409,7 +435,7 @@ const onCreateFileSelect = async (opts: { raw: File }) => {
       const res = await literaryApi.parseFile(form)
       newTaskForm.value.source_text = res.data?.text ?? ''
       if (!newTaskForm.value.title) newTaskForm.value.title = (file.name || '').replace(/\.[^.]+$/, '')
-      if (newTaskForm.value.source_text) ElMessage.success('文件已解析，可点击创建')
+      if (newTaskForm.value.source_text) ElMessage.success('文件已解析')
     } catch (e) {
       ElMessage.error('文件解析失败')
     }
@@ -460,10 +486,7 @@ const submitEditTask = async () => {
   if (!editingTask.value) return
   const id = editingTask.value.id
   try {
-    await literaryApi.updateTranslation(id, {
-      title: editForm.value.title || undefined,
-      status: editForm.value.status || undefined
-    })
+    await literaryApi.updateTranslation(id, { title: editForm.value.title || undefined, status: editForm.value.status || undefined })
     ElMessage.success('已保存')
     showEditTask.value = false
     editingTask.value = null
@@ -479,85 +502,136 @@ const submitEditTask = async () => {
 
 const confirmDeleteTask = async (task: any) => {
   try {
-    await ElMessageBox.confirm('确定删除该翻译任务？删除后不可恢复。', '删除确认', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      type: 'warning'
-    })
+    await ElMessageBox.confirm('确定删除该翻译任务？', '删除确认', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
     await literaryApi.deleteTranslation(task.id)
     ElMessage.success('已删除')
     taskList.value = taskList.value.filter((t: any) => t.id !== task.id)
-    if (currentTask.value?.id === task.id) {
-      currentTask.value = null
-      paragraphs.value = []
-    }
+    if (currentTask.value?.id === task.id) { currentTask.value = null; paragraphs.value = [] }
   } catch (e) {
     if (e !== 'cancel') ElMessage.error('删除失败')
   }
 }
 
+const isTaskRunning = (status: string) => ['translating', 'verifying', 'revising', 'finalizing'].includes(status)
+
+const enterBatchMode = () => {
+  batchMode.value = true
+  selectedTaskIds.value = taskList.value
+    .filter((t: any) => !isTaskRunning(t.status))
+    .filter((t: any) => t.status === 'pending' || t.status === 'failed')
+    .map((t: any) => t.id)
+}
+
+const exitBatchMode = () => {
+  batchMode.value = false
+  selectedTaskIds.value = []
+}
+
+const toggleTaskSelection = (id: number) => {
+  const task = taskList.value.find((t: any) => t.id === id)
+  if (task && isTaskRunning(task.status)) return
+  const idx = selectedTaskIds.value.indexOf(id)
+  if (idx >= 0) selectedTaskIds.value.splice(idx, 1)
+  else selectedTaskIds.value.push(id)
+}
+
+const startBatchWorkflow = async () => {
+  if (selectedTaskIds.value.length === 0) return
+  batchStarting.value = true
+  try {
+    await literaryApi.startBatchWorkflow(selectedTaskIds.value)
+    ElMessage.success(`已启动 ${selectedTaskIds.value.length} 个任务的翻译队列`)
+    exitBatchMode()
+    await loadTasks()
+    startBatchPolling()
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '批量启动失败')
+  } finally {
+    batchStarting.value = false
+  }
+}
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+let lastPolledStep = 0
+
 const startWorkflow = async () => {
   processing.value = true
   try {
     await literaryApi.startWorkflow(currentTask.value.id)
-    ElMessage.success('翻译完成')
-    await refreshTask()
-  } catch (error) {
-    ElMessage.error('翻译失败')
+    currentTask.value.status = 'translating'
+    currentTask.value.current_step = 1
+    startPolling()
+  } catch (error: any) {
+    const msg = error?.response?.data?.detail || '启动翻译失败'
+    ElMessage.error(msg)
   } finally {
     processing.value = false
   }
 }
 
-const verifyTranslation = async () => {
-  processing.value = true
-  try {
-    await literaryApi.verifyTranslation(currentTask.value.id)
-    ElMessage.success('校验完成')
-    await refreshTask()
-  } catch (error) {
-    ElMessage.error('校验失败')
-  } finally {
-    processing.value = false
-  }
+const startPolling = () => {
+  stopPolling()
+  lastPolledStep = currentTask.value?.current_step || 0
+  pollTimer = setInterval(async () => {
+    if (!currentTask.value) return stopPolling()
+    try {
+      const res = await literaryApi.getWorkflowStatus(currentTask.value.id)
+      const data = res.data
+      const prevStep = lastPolledStep
+      currentTask.value.status = data.overall_status
+      currentTask.value.current_step = data.current_step
+      lastPolledStep = data.current_step
+
+      const taskInList = taskList.value.find((t: any) => t.id === currentTask.value.id)
+      if (taskInList) { taskInList.status = data.overall_status; taskInList.current_step = data.current_step }
+
+      if (data.current_step !== prevStep) await refreshTask()
+
+      if (data.overall_status === 'completed' || data.overall_status === 'failed') {
+        stopPolling()
+        await refreshTask()
+        await loadTasks()
+        ElMessage[data.overall_status === 'completed' ? 'success' : 'error'](
+          data.overall_status === 'completed' ? '翻译流程已完成' : '翻译流程失败'
+        )
+      }
+    } catch (error) {
+      console.error('Polling error:', error)
+    }
+  }, 3000)
 }
 
-const reviseTranslation = async () => {
-  processing.value = true
-  try {
-    await literaryApi.reviseTranslation(currentTask.value.id)
-    ElMessage.success('修改完成')
-    await refreshTask()
-  } catch (error) {
-    ElMessage.error('修改失败')
-  } finally {
-    processing.value = false
-  }
+const stopPolling = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null } }
+
+let batchPollTimer: ReturnType<typeof setInterval> | null = null
+
+const startBatchPolling = () => {
+  stopBatchPolling()
+  batchPollTimer = setInterval(async () => {
+    try {
+      await loadTasks()
+      const hasRunning = taskList.value.some((t: any) => isTaskRunning(t.status))
+      if (!hasRunning) {
+        stopBatchPolling()
+        ElMessage.success('批量翻译全部完成')
+      }
+      if (currentTask.value) {
+        const updated = taskList.value.find((t: any) => t.id === currentTask.value.id)
+        if (updated && updated.status !== currentTask.value.status) await refreshTask()
+      }
+    } catch { /* ignore */ }
+  }, 4000)
 }
 
-const finalizeTranslation = async () => {
-  processing.value = true
-  try {
-    await literaryApi.finalizeTranslation(currentTask.value.id)
-    ElMessage.success('定稿完成')
-    await refreshTask()
-  } catch (error) {
-    ElMessage.error('定稿失败')
-  } finally {
-    processing.value = false
-  }
-}
+const stopBatchPolling = () => { if (batchPollTimer) { clearInterval(batchPollTimer); batchPollTimer = null } }
 
-const refreshTask = async () => {
-  if (currentTask.value) {
-    await selectTask(currentTask.value)
-  }
-}
+onUnmounted(() => { stopPolling(); stopBatchPolling() })
+
+const refreshTask = async () => { if (currentTask.value) await selectTask(currentTask.value) }
 
 const saveParagraph = async (para: any) => {
   try {
     await literaryApi.updateParagraph(para.id, { user_edited_text: para.editedText })
-    ElMessage.success('段落已保存')
   } catch (error) {
     ElMessage.error('保存失败')
   }
@@ -566,10 +640,7 @@ const saveParagraph = async (para: any) => {
 const exportTranslation = async () => {
   exporting.value = true
   try {
-    const response = await literaryApi.exportTranslation(currentTask.value.id, {
-      format: exportFormat.value as any,
-      include_source: exportWithSource.value
-    })
+    const response = await literaryApi.exportTranslation(currentTask.value.id, { format: exportFormat.value as any, include_source: exportWithSource.value })
     const blob = new Blob([response.data.content], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -586,257 +657,282 @@ const exportTranslation = async () => {
   }
 }
 
-const getStepLabel = (step: number) => {
-  const labels = ['', '初译', '校验', '修改', '定稿']
-  return labels[step] || ''
-}
-
-const getStatusType = (status: string) => {
-  const types: Record<string, string> = {
-    pending: 'info', translating: 'warning', verifying: 'warning',
-    revising: 'warning', finalizing: 'warning', completed: 'success', failed: 'danger'
-  }
-  return types[status] || 'info'
-}
-
-const getStatusText = (status: string) => {
-  const texts: Record<string, string> = {
-    pending: '待开始', translating: '翻译中', verifying: '校验中',
-    revising: '修改中', finalizing: '定稿中', completed: '已完成', failed: '失败'
-  }
-  return texts[status] || status
-}
-
-const getScoreColor = (score: number) => {
-  if (score >= 80) return '#67c23a'
-  if (score >= 60) return '#409eff'
-  if (score >= 40) return '#e6a23c'
-  return '#f56c6c'
-}
+const getStepLabel = (step: number) => ['', '初译', '校验', '修改', '定稿'][step] || ''
+const getStatusType = (status: string) => ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
+const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '修改中', finalizing: '定稿中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 </script>
 
 <style scoped lang="scss">
 .literary-view {
   display: flex;
   height: 100vh;
-  background: #f5f7fa;
+  background: #f0f2f5;
+}
 
-  .sidebar {
-    width: 280px;
+/* ===== 侧边栏 ===== */
+.sidebar {
+  width: 240px;
+  background: #fff;
+  border-right: 1px solid #e8e8e8;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.sidebar-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+
+  .brand {
+    font-size: 16px;
+    font-weight: 700;
+    color: #1d1d1f;
+  }
+
+  .header-btns {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+}
+
+.task-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  transition: background 0.15s;
+
+  &:hover { background: #f5f5f5; }
+  &.active { background: #e6f4ff; }
+  &.selected { background: #f0f7ff; }
+
+  .task-checkbox { margin-right: 4px; flex-shrink: 0; }
+
+  .task-info { flex: 1; min-width: 0; }
+  .task-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: #999; }
+
+  .task-actions { opacity: 0; transition: opacity 0.15s; flex-shrink: 0; display: flex; gap: 2px; }
+  &:hover .task-actions { opacity: 1; }
+}
+
+/* ===== 主内容区 ===== */
+.main-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+
+  .empty-card {
+    text-align: center;
+    padding: 40px 56px;
+    border-radius: 12px;
+    border: 2px dashed #d9d9d9;
     background: #fff;
-    border-right: 1px solid #e4e7ed;
+    transition: all 0.2s;
+
+    &:hover {
+      border-color: #409eff;
+      background: #f0f7ff;
+      .empty-icon { color: #409eff; }
+      h2 { color: #409eff; }
+    }
+
+    .empty-icon { font-size: 40px; color: #bfbfbf; transition: color 0.2s; }
+    h2 { margin: 12px 0 4px; font-size: 16px; font-weight: 600; color: #303133; transition: color 0.2s; }
+    p { margin: 0; font-size: 13px; color: #999; }
+  }
+}
+
+/* ===== 工作区 ===== */
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.top-bar {
+  padding: 20px 16px;
+  background: #fff;
+  border-bottom: 1px solid #e8e8e8;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+
+  .bar-left, .bar-right {
     display: flex;
-    flex-direction: column;
-
-    .sidebar-header {
-      padding: 16px 20px;
-      border-bottom: 1px solid #e4e7ed;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-
-      h3 {
-        margin: 0;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        font-size: 18px;
-
-        .el-icon {
-          color: #409eff;
-        }
-      }
-    }
-
-    .task-list {
-      flex: 1;
-      overflow-y: auto;
-      padding: 8px;
-
-      .task-item {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        padding: 12px;
-        border-radius: 8px;
-        cursor: pointer;
-        margin-bottom: 8px;
-
-        &:hover {
-          background: #f5f7fa;
-        }
-
-        &.active {
-          background: #e8f4ff;
-          border: 1px solid #409eff;
-        }
-
-        .task-info {
-          flex: 1;
-          min-width: 0;
-        }
-
-        .task-title {
-          font-weight: 500;
-          margin-bottom: 6px;
-        }
-
-        .task-meta {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-size: 12px;
-        }
-
-        .task-actions {
-          flex-shrink: 0;
-        }
-      }
-    }
-
-    .sidebar-footer {
-      padding: 12px;
-      border-top: 1px solid #e4e7ed;
-
-      .term-library-btn {
-        width: 100%;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        justify-content: flex-start;
-      }
-    }
+    align-items: center;
+    gap: 8px;
   }
 
-  .main-content {
-    flex: 1;
-    overflow: hidden;
+  .lang-sel { width: 90px; }
+  .arrow { color: #bfbfbf; font-size: 12px; }
+}
+
+.step-dots {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  .dot-item {
     display: flex;
-    flex-direction: column;
-  }
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.25s;
 
-  .translation-workspace {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    padding: 20px;
-    gap: 16px;
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: all 0.25s;
+    }
 
-    .editor-container {
-      background: #fff;
-      border-radius: 12px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.1);
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
+    &.pending {
+      color: #c0c4cc;
+      .dot { background: #dcdfe6; }
+    }
 
-      .toolbar {
-        padding: 12px 16px;
-        border-bottom: 1px solid #ebeef5;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
+    &.running {
+      color: #409eff;
+      background: #ecf5ff;
+      .dot { background: #409eff; box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.2); animation: pulse 1.5s infinite; }
+    }
 
-        .toolbar-left {
-          display: flex;
-          align-items: center;
-          gap: 12px;
+    &.done {
+      color: #67c23a;
+      .dot { background: #67c23a; }
+    }
 
-          .arrow {
-            color: #c0c4cc;
-          }
-        }
-      }
-
-      .workflow-progress {
-        padding: 16px;
-        border-bottom: 1px solid #ebeef5;
-        display: flex;
-        align-items: center;
-        gap: 24px;
-
-        .el-steps {
-          flex: 1;
-        }
-      }
-
-      .beauty-scores {
-        padding: 16px 24px;
-        border-bottom: 1px solid #ebeef5;
-        display: flex;
-        gap: 40px;
-
-        .score-item {
-          flex: 1;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-      }
-
-      .edit-area {
-        flex: 1;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        overflow: hidden;
-
-        .source-box,
-        .translation-box {
-          display: flex;
-          flex-direction: column;
-          overflow: hidden;
-
-          .box-header {
-            padding: 12px 16px;
-            border-bottom: 1px solid #ebeef5;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-          }
-
-          .box-content {
-            flex: 1;
-            overflow-y: auto;
-            padding: 16px;
-
-            pre {
-              margin: 0;
-              white-space: pre-wrap;
-              font-family: inherit;
-              line-height: 1.8;
-            }
-
-            .para-item {
-              margin-bottom: 20px;
-              padding-bottom: 20px;
-              border-bottom: 1px dashed #e4e7ed;
-
-              .para-num {
-                color: #409eff;
-                font-weight: 500;
-                margin-bottom: 8px;
-              }
-
-              .para-source {
-                color: #909399;
-                font-size: 13px;
-                margin-bottom: 8px;
-                padding: 8px;
-                background: #f5f7fa;
-                border-radius: 4px;
-              }
-            }
-          }
-        }
-
-        .source-box {
-          background: #fafafa;
-          border-right: 1px solid #ebeef5;
-        }
-      }
+    &.failed {
+      color: #f56c6c;
+      .dot { background: #f56c6c; }
     }
   }
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.2); }
+  50% { box-shadow: 0 0 0 6px rgba(64, 158, 255, 0.08); }
+}
+
+.score-popover {
+  .score-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 13px;
+    & + .score-row { border-top: 1px solid #f5f5f5; }
+  }
+}
+
+/* ===== 编辑区 ===== */
+.edit-area {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel-header {
+  padding: 8px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+  color: #606266;
+  background: #fafafa;
+  flex-shrink: 0;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.8;
+    color: #303133;
+  }
+}
+
+.source-panel {
+  background: #fafbfc;
+  border-right: 1px solid #f0f0f0;
+}
+
+.trans-panel {
+  background: #fff;
+}
+
+.para-item {
+  & + .para-item {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed #e8e8e8;
+  }
+
+  .para-source {
+    font-size: 13px;
+    color: #909399;
+    padding: 6px 8px;
+    background: #f5f7fa;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+}
+
+.no-content {
+  color: #bfbfbf;
+  text-align: center;
+  padding: 40px 0;
+  font-size: 14px;
+}
+
+.inline-upload {
+  margin-bottom: 8px;
 }
 </style>

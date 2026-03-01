@@ -85,10 +85,9 @@
           <el-input
             v-model="inputText"
             type="textarea"
-            :rows="10"
+            :autosize="{ minRows: 6 }"
             placeholder="在此输入要翻译的文学文本，或使用下方「上传文件」..."
             class="translation-textarea"
-            resize="none"
             :disabled="isTranslating"
           />
           <div class="char-count">{{ inputText.length }} 字符</div>
@@ -148,10 +147,9 @@
           <el-input
             v-model="outputText"
             type="textarea"
-            :rows="12"
+            :autosize="{ minRows: 6 }"
             placeholder="译文将显示在这里..."
             class="translation-textarea"
-            resize="none"
             :readonly="!isEditing"
           />
           <div v-if="isTranslating" class="loading-overlay">
@@ -201,12 +199,12 @@
           <el-icon><Headset /></el-icon>
           <span>音美</span>
         </div>
-        <el-progress
+        <!-- <el-progress
           :percentage="beautyScores.sound"
           :color="getScoreColor(beautyScores.sound)"
           :stroke-width="10"
           class="score-progress"
-        />
+        /> -->
         <span class="score-value">{{ beautyScores.sound.toFixed(1) }}</span>
       </div>
       <div class="score-item">
@@ -214,12 +212,12 @@
           <el-icon><EditPen /></el-icon>
           <span>词美</span>
         </div>
-        <el-progress
+        <!-- <el-progress
           :percentage="beautyScores.word"
           :color="getScoreColor(beautyScores.word)"
           :stroke-width="10"
           class="score-progress"
-        />
+        /> -->
         <span class="score-value">{{ beautyScores.word.toFixed(1) }}</span>
       </div>
       <div class="score-item">
@@ -227,12 +225,12 @@
           <el-icon><Sunrise /></el-icon>
           <span>意美</span>
         </div>
-        <el-progress
+        <!-- <el-progress
           :percentage="beautyScores.meaning"
           :color="getScoreColor(beautyScores.meaning)"
           :stroke-width="10"
           class="score-progress"
-        />
+        /> -->
         <span class="score-value">{{ beautyScores.meaning.toFixed(1) }}</span>
       </div>
     </div>
@@ -262,7 +260,7 @@
               <el-input
                 v-model="para.translation"
                 type="textarea"
-                :rows="2"
+                :autosize="{ minRows: 2 }"
                 @blur="saveParagraph(para)"
               />
             </div>
@@ -380,7 +378,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Memo, Monitor, DataLine, Grid, Upload, Edit, Delete } from '@element-plus/icons-vue'
 import { literaryApi, translateApi } from '@/api'
@@ -531,13 +529,10 @@ const startTranslation = async () => {
     })
     currentTask.value = response.data
     currentStep.value = 1
-    // 自动执行四步流程：初译 → 校验 → 修改 → 定稿
-    await literaryApi.runAllWorkflow(currentTask.value.id)
-    await refreshTask()
-    ElMessage.success('四步流程已完成，可在线编辑或导出')
+    await literaryApi.startWorkflow(currentTask.value.id)
+    startComponentPolling()
   } catch (error) {
     ElMessage.error('翻译失败')
-  } finally {
     isTranslating.value = false
   }
 }
@@ -597,30 +592,50 @@ const refreshTask = async () => {
   }
 }
 
+let componentPollTimer: ReturnType<typeof setInterval> | null = null
+
+const startComponentPolling = () => {
+  stopComponentPolling()
+  componentPollTimer = setInterval(async () => {
+    if (!currentTask.value) return stopComponentPolling()
+    try {
+      const res = await literaryApi.getWorkflowStatus(currentTask.value.id)
+      const data = res.data
+      currentTask.value.status = data.overall_status
+      currentStep.value = data.current_step
+
+      if (data.overall_status === 'completed' || data.overall_status === 'failed') {
+        stopComponentPolling()
+        await refreshTask()
+        isTranslating.value = false
+        isProcessing.value = false
+        if (data.overall_status === 'completed') {
+          ElMessage.success('四步流程已完成，可在线编辑或导出')
+        } else {
+          ElMessage.error('翻译流程失败')
+        }
+      }
+    } catch (error) {
+      console.error('Polling error:', error)
+    }
+  }, 3000)
+}
+
+const stopComponentPolling = () => {
+  if (componentPollTimer) {
+    clearInterval(componentPollTimer)
+    componentPollTimer = null
+  }
+}
+
 const proceedToNext = async () => {
   if (!currentTask.value) return
   isProcessing.value = true
-
   try {
-    switch (currentStep.value) {
-      case 1:
-        await literaryApi.startWorkflow(currentTask.value.id)
-        break
-      case 2:
-        await literaryApi.verifyTranslation(currentTask.value.id)
-        break
-      case 3:
-        await literaryApi.reviseTranslation(currentTask.value.id)
-        break
-      case 4:
-        await literaryApi.finalizeTranslation(currentTask.value.id)
-        break
-    }
-    await refreshTask()
-    ElMessage.success('步骤完成')
+    await literaryApi.startWorkflow(currentTask.value.id)
+    startComponentPolling()
   } catch (error) {
     ElMessage.error('处理失败')
-  } finally {
     isProcessing.value = false
   }
 }
@@ -790,6 +805,10 @@ const getScoreColor = (score: number) => {
 onMounted(() => {
   loadLanguages()
   loadHistory()
+})
+
+onUnmounted(() => {
+  stopComponentPolling()
 })
 </script>
 

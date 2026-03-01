@@ -36,11 +36,10 @@ def detect_language(text: str) -> str:
 
 @router.get("/languages", response_model=List[LanguageInfo])
 async def get_languages():
-    """获取支持的语言列表"""
-    client = AIClient()
+    """获取支持的语言列表（不依赖 API 配置）"""
     return [
         LanguageInfo(code=code, name=name)
-        for code, name in client.SUPPORTED_LANGUAGES.items()
+        for code, name in AIClient.SUPPORTED_LANGUAGES.items()
     ]
 
 

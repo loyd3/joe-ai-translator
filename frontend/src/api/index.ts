@@ -124,6 +124,7 @@ export const literaryApi = {
   // 更新翻译任务（改）
   updateTranslation: (id: number, data: {
     title?: string
+    source_text?: string
     final_translation?: string
     status?: string
   }) => api.put(`/literary/translations/${id}`, data),
@@ -131,25 +132,16 @@ export const literaryApi = {
   // 删除翻译任务
   deleteTranslation: (id: number) => api.delete(`/literary/translations/${id}`),
   
-  // ===== 四步翻译流程 =====
-  
-  // 开始翻译流程（第一步）
-  startWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/start`),
-  
-  // 执行校验（第二步）
-  verifyTranslation: (id: number) => api.post(`/literary/translations/${id}/workflow/verify`),
-  
-  // 执行修改（第三步）
-  reviseTranslation: (id: number) => api.post(`/literary/translations/${id}/workflow/revise`),
-  
-  // 执行定稿（第四步）
-  finalizeTranslation: (id: number) => api.post(`/literary/translations/${id}/workflow/finalize`),
-  
-  // 获取工作流状态
-  getWorkflowStatus: (id: number) => api.get(`/literary/translations/${id}/workflow`),
+  // ===== 翻译流程 =====
 
-  // 一键自动执行四步流程（初译→校验→修改→定稿）
-  runAllWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/run-all`),
+  // 启动四步翻译流程（后台执行，立即返回）
+  startWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/start`),
+
+  // 批量启动翻译流程（按顺序依次处理）
+  startBatchWorkflow: (ids: number[]) => api.post('/literary/translations/batch/workflow/start', { translation_ids: ids }),
+
+  // 获取工作流状态（轮询用）
+  getWorkflowStatus: (id: number) => api.get(`/literary/translations/${id}/workflow`),
   
   // ===== 段落管理 =====
   

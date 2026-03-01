@@ -13,7 +13,7 @@ import asyncio
 import re
 import tempfile
 import shutil
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.schemas.schemas import (
     LiteraryTranslationCreate, LiteraryTranslationResponse,
     LiteraryTranslationListItem, LiteraryParagraphResponse,
@@ -296,6 +296,8 @@ async def update_literary_translation(
     
     if request.title is not None:
         translation.title = request.title
+    if request.source_text is not None:
+        translation.source_text = request.source_text
     if request.final_translation is not None:
         translation.final_translation = request.final_translation
     if request.status is not None:
@@ -426,7 +428,7 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
 
 
 async def _execute_step4(translation_id: int, db: Session) -> None:
-    """执行第四步：定稿"""
+    """执行第四步：定稿 — 将所有段落整合为完整文章统一处理"""
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
     if not translation or translation.current_step < 4:
         raise HTTPException(status_code=400, detail="Please complete step 3 first")
@@ -434,18 +436,32 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
     paragraphs = db.query(LiteraryParagraph).filter(
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
-    full_step4 = []
-    for para in paragraphs:
-        result = await client.literary_finalize(
-            para.source_text, para.step3_revision or para.translated_text or "",
-            translation.source_lang, translation.target_lang, translation.literary_type
-        )
-        finalized = result.get("final_translation", para.step3_revision)
-        para.step4_finalization = finalized
-        para.translated_text = finalized
-        full_step4.append(finalized)
-    translation.step4_finalization = "\n\n".join(full_step4)
-    translation.final_translation = "\n\n".join(full_step4)
+
+    PARA_SEP = "\n\n"
+    full_source = PARA_SEP.join(p.source_text for p in paragraphs)
+    full_revised = PARA_SEP.join(
+        (p.step3_revision or p.translated_text or "") for p in paragraphs
+    )
+
+    result = await client.literary_finalize(
+        full_source, full_revised,
+        translation.source_lang, translation.target_lang, translation.literary_type
+    )
+    finalized_full = result.get("final_translation", full_revised)
+
+    finalized_parts = finalized_full.split(PARA_SEP)
+    for i, para in enumerate(paragraphs):
+        text = finalized_parts[i].strip() if i < len(finalized_parts) else (para.step3_revision or para.translated_text or "")
+        para.step4_finalization = text
+        para.translated_text = text
+
+    if len(finalized_parts) > len(paragraphs):
+        extra = PARA_SEP.join(finalized_parts[len(paragraphs):])
+        paragraphs[-1].step4_finalization += PARA_SEP + extra
+        paragraphs[-1].translated_text = paragraphs[-1].step4_finalization
+
+    translation.step4_finalization = finalized_full
+    translation.final_translation = finalized_full
     translation.current_step = 4
     translation.status = LiteraryTranslationStatus.COMPLETED
     from datetime import datetime
@@ -457,79 +473,136 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
         print(f"[Auto Extract Terms] Error: {e}")
 
 
+async def _run_workflow_background(translation_id: int):
+    """后台依次执行四步翻译流程：初译 → 校验 → 修改 → 定稿"""
+    db = SessionLocal()
+    try:
+        await _execute_step1(translation_id, db)
+        await _execute_step2(translation_id, db)
+        await _execute_step3(translation_id, db)
+        await _execute_step4(translation_id, db)
+    except Exception as e:
+        try:
+            translation = db.query(LiteraryTranslation).filter(
+                LiteraryTranslation.id == translation_id
+            ).first()
+            if translation:
+                translation.status = LiteraryTranslationStatus.FAILED
+                db.commit()
+        except Exception:
+            pass
+        print(f"[Workflow] Translation {translation_id} failed: {e}")
+    finally:
+        db.close()
+
+
 @router.post("/translations/{translation_id}/workflow/start")
 async def start_translation_workflow(
     translation_id: int,
     db: Session = Depends(get_db)
 ):
-    """开始四步翻译流程（第一步：初译）"""
-    await _execute_step1(translation_id, db)
-    return {"message": "Step 1 (Translation) completed", "current_step": 2}
-
-
-@router.post("/translations/{translation_id}/workflow/verify")
-async def verify_translation(
-    translation_id: int,
-    db: Session = Depends(get_db)
-):
-    """执行第二步：校验"""
-    await _execute_step2(translation_id, db)
-    translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
-    return {
-        "message": "Step 2 (Verification) completed",
-        "current_step": 3,
-        "beauty_scores": {
-            "sound": translation.beauty_sound_score,
-            "word": translation.beauty_word_score,
-            "meaning": translation.beauty_meaning_score
-        }
-    }
-
-
-@router.post("/translations/{translation_id}/workflow/revise")
-async def revise_translation(
-    translation_id: int,
-    db: Session = Depends(get_db)
-):
-    """执行第三步：修改"""
-    await _execute_step3(translation_id, db)
-    return {"message": "Step 3 (Revision) completed", "current_step": 4}
-
-
-@router.post("/translations/{translation_id}/workflow/finalize")
-async def finalize_translation(
-    translation_id: int,
-    db: Session = Depends(get_db)
-):
-    """执行第四步：定稿"""
-    await _execute_step4(translation_id, db)
-    return {"message": "Step 4 (Finalization) completed. Translation finished!", "current_step": 4}
-
-
-@router.post("/translations/{translation_id}/workflow/run-all")
-async def run_all_workflow_steps(
-    translation_id: int,
-    db: Session = Depends(get_db)
-):
-    """一键自动执行四步流程：初译 → 校验 → 修改 → 定稿"""
-    translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
+    """启动四步翻译流程（后台执行：初译 → 校验 → 修改 → 定稿），立即返回，前端轮询状态"""
+    translation = db.query(LiteraryTranslation).filter(
+        LiteraryTranslation.id == translation_id
+    ).first()
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
-    await _execute_step1(translation_id, db)
-    await _execute_step2(translation_id, db)
-    await _execute_step3(translation_id, db)
-    await _execute_step4(translation_id, db)
-    translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
-    return {
-        "message": "四步流程已全部完成",
-        "current_step": 4,
-        "status": translation.status,
-        "beauty_scores": {
-            "sound": translation.beauty_sound_score,
-            "word": translation.beauty_word_score,
-            "meaning": translation.beauty_meaning_score
-        }
+
+    running_statuses = {
+        LiteraryTranslationStatus.TRANSLATING,
+        LiteraryTranslationStatus.VERIFYING,
+        LiteraryTranslationStatus.REVISING,
+        LiteraryTranslationStatus.FINALIZING,
     }
+    if translation.status in running_statuses:
+        raise HTTPException(status_code=409, detail="翻译流程正在执行中")
+
+    translation.current_step = 1
+    translation.status = LiteraryTranslationStatus.TRANSLATING
+    translation.step1_translation = None
+    translation.step2_verification = None
+    translation.step3_revision = None
+    translation.step4_finalization = None
+    translation.final_translation = None
+    translation.beauty_sound_score = None
+    translation.beauty_word_score = None
+    translation.beauty_meaning_score = None
+    translation.completed_at = None
+    db.commit()
+
+    asyncio.create_task(_run_workflow_background(translation_id))
+
+    return {"message": "翻译流程已启动", "status": "translating"}
+
+
+async def _run_batch_workflow_background(translation_ids: list):
+    """依次执行多个任务的翻译流程，前一个完成后才开始下一个"""
+    for tid in translation_ids:
+        db = SessionLocal()
+        try:
+            translation = db.query(LiteraryTranslation).filter(
+                LiteraryTranslation.id == tid
+            ).first()
+            if not translation:
+                continue
+            translation.current_step = 1
+            translation.status = LiteraryTranslationStatus.TRANSLATING
+            translation.step1_translation = None
+            translation.step2_verification = None
+            translation.step3_revision = None
+            translation.step4_finalization = None
+            translation.final_translation = None
+            translation.beauty_sound_score = None
+            translation.beauty_word_score = None
+            translation.beauty_meaning_score = None
+            translation.completed_at = None
+            db.commit()
+        except Exception:
+            db.close()
+            continue
+        finally:
+            db.close()
+
+        try:
+            await _run_workflow_background(tid)
+        except Exception as e:
+            print(f"[BatchWorkflow] Translation {tid} failed: {e}")
+
+
+@router.post("/translations/batch/workflow/start")
+async def start_batch_workflow(
+    request: dict,
+    db: Session = Depends(get_db)
+):
+    """批量启动翻译流程，按顺序依次处理多个任务"""
+    translation_ids = request.get("translation_ids", [])
+    if not translation_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一个任务")
+
+    running_statuses = {
+        LiteraryTranslationStatus.TRANSLATING,
+        LiteraryTranslationStatus.VERIFYING,
+        LiteraryTranslationStatus.REVISING,
+        LiteraryTranslationStatus.FINALIZING,
+    }
+
+    valid_ids = []
+    for tid in translation_ids:
+        t = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == tid).first()
+        if not t:
+            continue
+        if t.status in running_statuses:
+            continue
+        t.status = LiteraryTranslationStatus.PENDING
+        valid_ids.append(tid)
+
+    if not valid_ids:
+        raise HTTPException(status_code=400, detail="没有可启动的任务")
+
+    db.commit()
+    asyncio.create_task(_run_batch_workflow_background(valid_ids))
+
+    return {"message": f"已加入队列 {len(valid_ids)} 个任务", "translation_ids": valid_ids}
 
 
 @router.get("/translations/{translation_id}/workflow", response_model=LiteraryTranslationWorkflowResponse)
@@ -537,41 +610,39 @@ async def get_workflow_status(
     translation_id: int,
     db: Session = Depends(get_db)
 ):
-    """获取工作流状态"""
+    """获取工作流状态（供前端轮询）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id
     ).first()
-    
+
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
-    
-    steps = [
-        WorkflowStepResponse(
-            step=1,
-            step_name="翻译",
-            status="completed" if translation.step1_translation else "pending",
-            result=translation.step1_translation[:200] + "..." if translation.step1_translation and len(translation.step1_translation) > 200 else translation.step1_translation
-        ),
-        WorkflowStepResponse(
-            step=2,
-            step_name="校验",
-            status="completed" if translation.step2_verification else ("pending" if translation.current_step < 2 else "processing"),
-            result=translation.step2_verification[:200] + "..." if translation.step2_verification and len(translation.step2_verification) > 200 else translation.step2_verification
-        ),
-        WorkflowStepResponse(
-            step=3,
-            step_name="修改",
-            status="completed" if translation.step3_revision else ("pending" if translation.current_step < 3 else "processing"),
-            result=translation.step3_revision[:200] + "..." if translation.step3_revision and len(translation.step3_revision) > 200 else translation.step3_revision
-        ),
-        WorkflowStepResponse(
-            step=4,
-            step_name="定稿",
-            status="completed" if translation.step4_finalization else ("pending" if translation.current_step < 4 else "processing"),
-            result=translation.step4_finalization[:200] + "..." if translation.step4_finalization and len(translation.step4_finalization) > 200 else translation.step4_finalization
-        ),
+
+    status_to_running_step = {
+        "translating": 1, "verifying": 2, "revising": 3, "finalizing": 4,
+    }
+    running_step = status_to_running_step.get(translation.status, 0)
+
+    step_fields = [
+        (1, "翻译", translation.step1_translation),
+        (2, "校验", translation.step2_verification),
+        (3, "修改", translation.step3_revision),
+        (4, "定稿", translation.step4_finalization),
     ]
-    
+
+    steps = []
+    for step_num, step_name, result in step_fields:
+        if result:
+            step_status = "completed"
+        elif step_num == running_step:
+            step_status = "processing"
+        else:
+            step_status = "pending"
+        truncated = result[:200] + "..." if result and len(result) > 200 else result
+        steps.append(WorkflowStepResponse(
+            step=step_num, step_name=step_name, status=step_status, result=truncated,
+        ))
+
     return LiteraryTranslationWorkflowResponse(
         translation_id=translation_id,
         current_step=translation.current_step,

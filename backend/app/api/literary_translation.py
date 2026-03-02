@@ -5,6 +5,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 from typing import List, Optional, AsyncGenerator
 import json
 import os
@@ -211,6 +212,24 @@ def split_text_into_paragraphs(text: str, max_size: int = MAX_PARAGRAPH_SIZE) ->
     return result
 
 
+def _sanitize_text_for_api(text: str) -> str:
+    """移除空字节和控制字符，避免 Windows 上触发 OSError [Errno 22] Invalid argument"""
+    if not text:
+        return text
+    import re
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text).strip() or text
+
+
+def _safe_datetime_str(dt) -> str:
+    """格式化 created_at 等时间，避免 Windows 上 strftime 触发 Errno 22"""
+    if not dt:
+        return ""
+    try:
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except (OSError, ValueError):
+        return dt.isoformat()[:16].replace("T", " ") if hasattr(dt, "isoformat") else str(dt)
+
+
 def get_reference_content(doc_ids: List[int], db: Session) -> str:
     """获取参考文档内容"""
     if not doc_ids:
@@ -281,11 +300,20 @@ async def list_literary_translations(
     db: Session = Depends(get_db)
 ):
     """获取文学翻译任务列表"""
-    query = db.query(LiteraryTranslation)
-    if status:
-        query = query.filter(LiteraryTranslation.status == status)
-    query = query.order_by(LiteraryTranslation.created_at.desc())
-    return query.offset(skip).limit(limit).all()
+    try:
+        query = db.query(LiteraryTranslation)
+        if status:
+            query = query.filter(LiteraryTranslation.status == status)
+        query = query.order_by(LiteraryTranslation.created_at.desc())
+        return query.offset(skip).limit(limit).all()
+    except OperationalError as e:
+        err_msg = str(getattr(e, "orig", e))
+        if "Unknown column" in err_msg:
+            raise HTTPException(
+                status_code=503,
+                detail="Database schema is outdated. From project root run: mysql -u root -p aitranslator < backend/migrations/schema_update_literary_translations.sql"
+            )
+        raise
 
 
 @router.get("/translations/{translation_id}", response_model=LiteraryTranslationResponse)
@@ -372,9 +400,11 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
     reference_content = get_reference_and_requirements(translation, db)
     full_step1 = []
     for para in paragraphs:
+        source_text = _sanitize_text_for_api(para.source_text or "")
+        ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
         result = await client.literary_translate(
-            para.source_text, translation.source_lang, translation.target_lang,
-            translation.literary_type, reference_content
+            source_text, translation.source_lang, translation.target_lang,
+            translation.literary_type, ref_safe
         )
         para.step1_translation = result
         para.translated_text = result
@@ -557,6 +587,7 @@ async def _run_workflow_background(translation_id: int):
             ).first()
             if translation:
                 translation.status = LiteraryTranslationStatus.FAILED
+                translation.error_message = str(e)
                 db.commit()
         except Exception:
             pass
@@ -808,7 +839,7 @@ def generate_txt_content(translation, paragraphs, include_source: bool = False) 
     lines.append(f"原文语言: {translation.source_lang}")
     lines.append(f"译文语言: {translation.target_lang}")
     lines.append(f"文学类型: {translation.literary_type}")
-    lines.append(f"生成时间: {translation.created_at.strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"生成时间: {_safe_datetime_str(translation.created_at)}")
     lines.append("")
     
     if translation.beauty_sound_score:
@@ -850,7 +881,7 @@ def generate_md_content(translation, paragraphs, include_source: bool = False) -
     lines.append(f"- **原文语言**: {translation.source_lang}")
     lines.append(f"- **译文语言**: {translation.target_lang}")
     lines.append(f"- **文学类型**: {translation.literary_type}")
-    lines.append(f"- **生成时间**: {translation.created_at.strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"- **生成时间**: {_safe_datetime_str(translation.created_at)}")
     lines.append("")
     
     if translation.beauty_sound_score:
@@ -922,7 +953,7 @@ def generate_html_content(translation, paragraphs, include_source: bool = False)
     html_parts.append(f"<p><strong>原文语言：</strong>{translation.source_lang}</p>")
     html_parts.append(f"<p><strong>译文语言：</strong>{translation.target_lang}</p>")
     html_parts.append(f"<p><strong>文学类型：</strong>{translation.literary_type}</p>")
-    html_parts.append(f"<p><strong>生成时间：</strong>{translation.created_at.strftime('%Y-%m-%d %H:%M')}</p>")
+    html_parts.append(f"<p><strong>生成时间：</strong>{_safe_datetime_str(translation.created_at)}</p>")
     
     if translation.beauty_sound_score:
         html_parts.append("<div class='scores'>")
@@ -998,7 +1029,7 @@ def generate_csv_content(translation, paragraphs, include_source: bool = False) 
     writer.writerow(["原文语言", translation.source_lang])
     writer.writerow(["译文语言", translation.target_lang])
     writer.writerow(["文学类型", translation.literary_type])
-    writer.writerow(["生成时间", translation.created_at.strftime('%Y-%m-%d %H:%M') if translation.created_at else ""])
+    writer.writerow(["生成时间", _safe_datetime_str(translation.created_at)])
     
     if translation.beauty_sound_score:
         writer.writerow(["音美评分", f"{translation.beauty_sound_score:.1f}"])

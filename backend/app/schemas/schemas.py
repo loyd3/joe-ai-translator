@@ -2,7 +2,7 @@
 Pydantic 数据模型
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -35,7 +35,17 @@ class TranslationHistoryItem(BaseModel):
     target_lang: str
     is_favorite: bool
     created_at: datetime
-    
+
+    @field_serializer('created_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 
@@ -68,7 +78,17 @@ class BatchTranslationResponse(BaseModel):
     items: List[BatchTranslationItem]
     created_at: datetime
     completed_at: Optional[datetime] = None
-    
+
+    @field_serializer('created_at', 'completed_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 
@@ -150,7 +170,17 @@ class ReferenceDocumentResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime]
-    
+
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 
@@ -167,7 +197,17 @@ class ReferenceDocumentListItem(BaseModel):
     description: Optional[str]
     is_active: bool
     created_at: datetime
-    
+
+    @field_serializer('created_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 
@@ -231,7 +271,19 @@ class LiteraryTranslationResponse(BaseModel):
     updated_at: Optional[datetime]
     completed_at: Optional[datetime]
     paragraphs: Optional[List[LiteraryParagraphResponse]] = None
-    
+    error_message: Optional[str] = None
+
+    @field_serializer('created_at', 'updated_at', 'completed_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            # Windows 上某些日期值会触发 OSError，使用备用方案
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 
@@ -242,6 +294,7 @@ class LiteraryTranslationListItem(BaseModel):
     title: Optional[str]
     status: str
     current_step: int
+    error_message: Optional[str] = None
     source_lang: str
     target_lang: str
     literary_type: str
@@ -249,7 +302,18 @@ class LiteraryTranslationListItem(BaseModel):
     beauty_word_score: Optional[float]
     beauty_meaning_score: Optional[float]
     created_at: datetime
-    
+
+    @field_serializer('created_at')
+    def serialize_created_at(self, dt: datetime, _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            # Windows 上某些日期值会触发 OSError，使用备用方案
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 
@@ -340,7 +404,17 @@ class ProfessionalTermResponse(BaseModel):
     is_verified: bool
     created_at: datetime
     updated_at: Optional[datetime]
-    
+
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 
@@ -373,7 +447,17 @@ class TranslationTermSummaryResponse(BaseModel):
     updated_terms: int
     summary_text: Optional[str]
     created_at: datetime
-    
+
+    @field_serializer('created_at')
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        """安全序列化 datetime，避免 Windows 上的 OSError [Errno 22] Invalid argument"""
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
     class Config:
         from_attributes = True
 

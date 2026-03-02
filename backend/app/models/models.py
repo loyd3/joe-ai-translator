@@ -98,6 +98,9 @@ class LiteraryTranslation(Base):
     # 用户编辑的最终译文
     final_translation = Column(Text, nullable=True, comment="用户编辑后的最终译文")
     
+    # 工作流失败时记录的错误原因（便于排查）
+    error_message = Column(Text, nullable=True, comment="翻译流程失败时的错误信息")
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     completed_at = Column(DateTime(timezone=True), nullable=True)

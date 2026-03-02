@@ -510,7 +510,7 @@ const newTaskForm = ref({
 })
 const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
 const MAX_FILE_SIZE = 10 * 1024 * 1024
-const MAX_TEXT_CHARS = 500000
+const MAX_TEXT_CHARS = 1000000
 
 const estimatedParagraphs = computed(() => {
   const text = newTaskForm.value.source_text

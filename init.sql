@@ -75,8 +75,14 @@ CREATE TABLE literary_translations (
     -- 参考文档关联
     reference_document_ids JSON DEFAULT '[]' COMMENT '关联的参考文档ID列表',
     
+    -- 用户翻译前指明的需求（风格、术语等）
+    user_requirements TEXT NULL COMMENT '用户翻译需求说明',
+    
     -- 用户编辑的最终译文
     final_translation LONGTEXT NULL COMMENT '用户编辑后的最终译文',
+    
+    -- 工作流失败时记录的错误原因
+    error_message TEXT NULL COMMENT '翻译流程失败时的错误信息',
     
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at TIMESTAMP NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',

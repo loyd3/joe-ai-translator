@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     
     # DeepSeek
     deepseek_api_key: Optional[str] = None
+    deepseek_base_url: Optional[str] = None
     deepseek_model: str = "deepseek-chat"
     
     # OpenAI
@@ -194,7 +195,7 @@ class AIClient:
             self.model = self.settings.openai_model or "gpt-4"
         elif provider == "deepseek":
             api_key = self.settings.deepseek_api_key
-            base_url = self.PROVIDER_BASE_URLS["deepseek"]
+            base_url = self.settings.deepseek_base_url or self.PROVIDER_BASE_URLS["deepseek"]
             self.model = self.settings.deepseek_model or "deepseek-chat"
         elif provider == "siliconflow":
             api_key = self.settings.siliconflow_api_key
@@ -345,6 +346,14 @@ Output only the translated text, no additional comments."""
         }
         return domain_notes.get(literary_type, "")
 
+    @staticmethod
+    def _sanitize_for_api(s: Optional[str]) -> str:
+        """移除控制字符，避免 Windows 上 OSError [Errno 22]"""
+        if not s:
+            return s or ""
+        import re
+        return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s).strip() or s
+
     def build_literary_translation_prompt(
         self, 
         text: str, 
@@ -357,6 +366,8 @@ Output only the translated text, no additional comments."""
         构建翻译提示词 - 第一步：初译
         文学类使用三美原则，专业类使用领域规范
         """
+        text = self._sanitize_for_api(text)
+        reference_content = self._sanitize_for_api(reference_content) if reference_content else None
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
         lit_type_name = self.get_literary_type_name(literary_type)

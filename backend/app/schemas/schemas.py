@@ -131,7 +131,7 @@ class TranslationStep(int, Enum):
     """翻译步骤"""
     TRANSLATE = 1       # 翻译
     VERIFY = 2          # 校验
-    REVISE = 3          # 修改
+    REVISE = 3          # 润色
     FINALIZE = 4        # 定稿
 
 

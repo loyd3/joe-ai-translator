@@ -4,6 +4,7 @@
 """
 
 import os
+import sys
 from pathlib import Path
 import openai
 from pydantic_settings import BaseSettings
@@ -13,6 +14,20 @@ from typing import AsyncGenerator, Optional, List
 # backend/app/core -> parent*3=backend -> parent*4=项目根
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _ENV_FILE = _PROJECT_ROOT / ".env"
+
+
+def _safe_print(msg: str) -> None:
+    """Windows 下 print() 可能因控制台编码或无效字符触发 OSError [Errno 22]，此处安全输出。"""
+    try:
+        print(msg)
+    except OSError:
+        try:
+            # 若 stdout 编码异常，用 ASCII 替换不可表示字符再写
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+            sys.stdout.buffer.write(msg.encode(enc, errors="replace") + b"\n")
+            sys.stdout.buffer.flush()
+        except Exception:
+            pass
 
 
 class Settings(BaseSettings):
@@ -185,7 +200,7 @@ class AIClient:
             if provider == "custom" and not base_url:
                 raise ValueError("Custom provider requires base_url")
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
-            print(f"[AIClient] Initialized from DB: provider={provider}, model={self.model}")
+            _safe_print(f"[AIClient] Initialized from DB: provider={provider}, model={self.model}")
             return
 
         provider = self.settings.ai_provider
@@ -214,7 +229,7 @@ class AIClient:
             raise ValueError(f"API key not configured for provider: {provider}")
 
         self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
-        print(f"[AIClient] Initialized from .env: provider={provider}, model={self.model}")
+        _safe_print(f"[AIClient] Initialized from .env: provider={provider}, model={self.model}")
 
     def reload_from_db(self):
         """重新从数据库加载配置并重新初始化客户端"""
@@ -624,8 +639,8 @@ Output only the translated text, no additional comments."""
         literary_type: str = "general",
     ) -> dict:
         """
-        文学翻译 - 第三步：修改
-        根据校验结果进行针对性修改
+        文学翻译 - 第三步：润色
+        根据校验结果进行润色
         """
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
@@ -635,9 +650,9 @@ Output only the translated text, no additional comments."""
         
         if self.is_professional_type(literary_type):
             lit_type_name = self.get_literary_type_name(literary_type)
-            system_prompt = f"""你是一位{lit_type_name}领域的翻译修订专家。请根据校验反馈，对译文进行针对性修改和完善。
+            system_prompt = f"""你是一位{lit_type_name}领域的翻译修订专家。请根据校验反馈，对译文进行润色和完善。
 
-## 修改原则
+## 润色原则
 
 ### 1. 术语修正（最优先）
 - 修正校验中发现的术语翻译错误
@@ -659,17 +674,17 @@ Output only the translated text, no additional comments."""
 
 请以JSON格式输出，包含以下字段：
 {{
-    "revised_translation": "修改后的译文",
-    "revision_summary": "修改总结",
+    "revised_translation": "润色后的译文",
+    "revision_summary": "润色总结",
     "key_improvements": ["改进点1", "改进点2"],
     "beauty_sound_enhancement": "术语准确度提升说明",
     "beauty_word_enhancement": "表达规范度提升说明",
     "beauty_meaning_enhancement": "信息完整度提升说明"
 }}"""
         else:
-            system_prompt = f"""你是一位追求精准的翻译修订专家。请根据校验反馈，对译文进行针对性修改和润色。
+            system_prompt = f"""你是一位追求精准的翻译修订专家。请根据校验反馈，对译文进行润色。
 
-## 修改原则
+## 润色原则
 
 ### 1. 风格校准（最优先）
 - 重新审视原文的语体、语气、用词层次
@@ -692,8 +707,8 @@ Output only the translated text, no additional comments."""
 
 请以JSON格式输出，包含以下字段：
 {{
-    "revised_translation": "修改后的译文",
-    "revision_summary": "修改总结，说明主要改进了哪些方面",
+    "revised_translation": "润色后的译文",
+    "revision_summary": "润色总结，说明主要改进了哪些方面",
     "key_improvements": ["改进点1", "改进点2"],
     "beauty_sound_enhancement": "音美提升说明",
     "beauty_word_enhancement": "词美提升说明",
@@ -705,7 +720,7 @@ Output only the translated text, no additional comments."""
         
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"【原文】({source_name}):\n{source_text}\n\n【待修改译文】({target_name}):\n{verified_translation}\n\n【校验反馈】\n发现的问题：\n{issues_text}\n\n改进建议：\n{suggestions_text}\n\n请进行修改润色。"}
+            {"role": "user", "content": f"【原文】({source_name}):\n{source_text}\n\n【待润色译文】({target_name}):\n{verified_translation}\n\n【校验反馈】\n发现的问题：\n{issues_text}\n\n改进建议：\n{suggestions_text}\n\n请进行润色。"}
         ]
         
         response = await self.client.chat.completions.create(
@@ -883,7 +898,7 @@ Output only the translated text, no additional comments."""
         )
         step2 = step2_result.get("verified_translation", step1)
         
-        # 第三步：修改
+        # 第三步：润色
         step3_result = await self.literary_revise(
             paragraph, step2, step2_result, source_lang, target_lang, literary_type
         )

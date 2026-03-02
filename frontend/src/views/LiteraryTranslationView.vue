@@ -175,7 +175,7 @@
                 <el-radio-group v-model="displayStep" size="small">
                   <el-radio-button :label="1">初译</el-radio-button>
                   <el-radio-button :label="2" :disabled="!step2Available">校验</el-radio-button>
-                  <el-radio-button :label="3" :disabled="!step3Available">修改</el-radio-button>
+                  <el-radio-button :label="3" :disabled="!step3Available">润色</el-radio-button>
                   <el-radio-button :label="4" :disabled="!step4Available">定稿</el-radio-button>
                 </el-radio-group>
               </div>
@@ -545,7 +545,7 @@ const isWorkflowRunning = computed(() =>
 const paraProgress = ref<{ total: number; done: number }>({ total: 0, done: 0 })
 
 const stepItems = computed(() => {
-  const labels = ['翻译', '校验', '修改', '定稿']
+  const labels = ['翻译', '校验', '润色', '定稿']
   const statusMap: Record<string, number> = { translating: 0, verifying: 1, revising: 2, finalizing: 3 }
   const active = currentStep.value
   const runningIdx = statusMap[currentTask.value?.status] ?? -1
@@ -887,9 +887,9 @@ const exportTranslation = async () => {
   }
 }
 
-const getStepLabel = (step: number) => ['', '初译', '校验', '修改', '定稿'][step] || ''
+const getStepLabel = (step: number) => ['', '初译', '校验', '润色', '定稿'][step] || ''
 const getStatusType = (status: string) => ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
-const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '修改中', finalizing: '定稿中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 </script>
 
 <style scoped lang="scss">

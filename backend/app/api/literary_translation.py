@@ -14,6 +14,7 @@ import asyncio
 import re
 import tempfile
 import shutil
+import traceback
 from app.database import get_db, SessionLocal
 from app.schemas.schemas import (
     LiteraryTranslationCreate, LiteraryTranslationResponse,
@@ -572,26 +573,59 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
         print(f"[Auto Extract Terms] Error: {e}")
 
 
+def _format_error_debug(exc: BaseException, step: int, step_name: str) -> str:
+    """将异常格式化为带调试信息的 error_message（便于排查 [Errno 22] 等）"""
+    tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    tb_str = "".join(tb_lines).strip()
+    # 限制长度，避免 DB 字段过长；保留最后约 2500 字符（通常含关键堆栈）
+    max_tb = 2500
+    if len(tb_str) > max_tb:
+        tb_str = "...\n" + tb_str[-max_tb:]
+    return (
+        f"[Step {step} - {step_name}] {type(exc).__name__}: {exc}\n\n"
+        f"Traceback:\n{tb_str}"
+    )
+
+
 async def _run_workflow_background(translation_id: int):
     """后台依次执行四步翻译流程：初译 → 校验 → 修改 → 定稿"""
     db = SessionLocal()
+    steps = [
+        (1, "初译", _execute_step1),
+        (2, "校验", _execute_step2),
+        (3, "修改", _execute_step3),
+        (4, "定稿", _execute_step4),
+    ]
     try:
-        await _execute_step1(translation_id, db)
-        await _execute_step2(translation_id, db)
-        await _execute_step3(translation_id, db)
-        await _execute_step4(translation_id, db)
+        for step_num, step_name, step_fn in steps:
+            await step_fn(translation_id, db)
     except Exception as e:
+        # 确定失败步骤（当前步骤尚未完成）
+        failed_step = 1
+        failed_name = "初译"
+        try:
+            t = db.query(LiteraryTranslation).filter(
+                LiteraryTranslation.id == translation_id
+            ).first()
+            if t is not None:
+                # current_step 是“正在做”的步骤，失败时就是该步
+                failed_step = getattr(t, "current_step", 1) or 1
+                for sn, sname, _ in steps:
+                    if sn == failed_step:
+                        failed_name = sname
+                        break
+        except Exception:
+            pass
         try:
             translation = db.query(LiteraryTranslation).filter(
                 LiteraryTranslation.id == translation_id
             ).first()
             if translation:
                 translation.status = LiteraryTranslationStatus.FAILED
-                translation.error_message = str(e)
+                translation.error_message = _format_error_debug(e, failed_step, failed_name)
                 db.commit()
         except Exception:
             pass
-        import traceback
         traceback.print_exc()
         print(f"[Workflow] Translation {translation_id} failed: {e}")
     finally:
@@ -630,6 +664,7 @@ async def start_translation_workflow(
     translation.beauty_word_score = None
     translation.beauty_meaning_score = None
     translation.completed_at = None
+    translation.error_message = None  # 新流程开始时清空旧错误
     db.commit()
 
     asyncio.create_task(_run_workflow_background(translation_id))

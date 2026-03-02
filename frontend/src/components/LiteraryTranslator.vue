@@ -30,7 +30,7 @@
         <el-steps :active="currentStep" finish-status="success" simple class="workflow-steps">
           <el-step title="翻译" />
           <el-step title="校验" />
-          <el-step title="修改" />
+          <el-step title="润色" />
           <el-step title="定稿" />
         </el-steps>
       </div>
@@ -171,7 +171,7 @@
             <el-radio-group v-model="displayVersion" size="small" v-if="hasTranslations">
               <el-radio-button :label="1">初译</el-radio-button>
               <el-radio-button :label="2" :disabled="!step2Done">校验</el-radio-button>
-              <el-radio-button :label="3" :disabled="!step3Done">修改</el-radio-button>
+              <el-radio-button :label="3" :disabled="!step3Done">润色</el-radio-button>
               <el-radio-button :label="4" :disabled="!step4Done">定稿</el-radio-button>
             </el-radio-group>
           </div>
@@ -316,7 +316,7 @@
             </div>
           </div>
           <div class="history-actions" @click.stop>
-            <el-tooltip content="修改" placement="top">
+            <el-tooltip content="润色" placement="top">
               <el-button link type="primary" size="small" circle @click="openEditTaskDialog(task)">
                 <el-icon><Edit /></el-icon>
               </el-button>
@@ -342,7 +342,7 @@
             <el-option label="待开始" value="pending" />
             <el-option label="翻译中" value="translating" />
             <el-option label="校验中" value="verifying" />
-            <el-option label="修改中" value="revising" />
+            <el-option label="润色中" value="revising" />
             <el-option label="定稿中" value="finalizing" />
             <el-option label="已完成" value="completed" />
             <el-option label="失败" value="failed" />
@@ -454,7 +454,7 @@ const canProceedToNext = computed(() => {
 })
 
 const nextStepLabel = computed(() => {
-  const labels = ['', '执行校验', '执行修改', '执行定稿']
+  const labels = ['', '执行校验', '执行润色', '执行定稿']
   return labels[currentStep.value] || ''
 })
 
@@ -796,7 +796,7 @@ const getStatusText = (status: string) => {
     pending: '待开始',
     translating: '翻译中',
     verifying: '校验中',
-    revising: '修改中',
+    revising: '润色中',
     finalizing: '定稿中',
     completed: '已完成',
     failed: '失败'

@@ -172,14 +172,43 @@ async def upload_reference_document(
 # 文学翻译任务管理
 # ============================================================
 
-def split_text_into_paragraphs(text: str) -> List[str]:
-    """将文本分割成段落"""
-    # 按空行分割，保留非空段落
+MAX_PARAGRAPH_SIZE = 2000
+
+
+def _split_oversized_paragraph(text: str, max_size: int = MAX_PARAGRAPH_SIZE) -> List[str]:
+    """将超长段落按句子边界拆分为不超过 max_size 的块"""
+    if len(text) <= max_size:
+        return [text]
+    import re
+    sentences = re.split(r'(?<=[。！？.!?\n])', text)
+    chunks, current = [], ""
+    for s in sentences:
+        if not s:
+            continue
+        if len(current) + len(s) > max_size and current:
+            chunks.append(current.strip())
+            current = s
+        else:
+            current += s
+    if current.strip():
+        chunks.append(current.strip())
+    if not chunks:
+        chunks = [text[i:i+max_size] for i in range(0, len(text), max_size)]
+    return chunks
+
+
+def split_text_into_paragraphs(text: str, max_size: int = MAX_PARAGRAPH_SIZE) -> List[str]:
+    """将文本分割成段落，并确保每段不超过 max_size 字符"""
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
     if not paragraphs:
-        # 如果没有空行，按换行分割
         paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
-    return paragraphs
+    result = []
+    for p in paragraphs:
+        if len(p) > max_size:
+            result.extend(_split_oversized_paragraph(p, max_size))
+        else:
+            result.append(p)
+    return result
 
 
 def get_reference_content(doc_ids: List[int], db: Session) -> str:
@@ -213,8 +242,7 @@ async def create_literary_translation(
     request: LiteraryTranslationCreate,
     db: Session = Depends(get_db)
 ):
-    """创建文学翻译任务"""
-    # 创建翻译任务
+    """创建文学翻译任务（大文本自动智能分段）"""
     translation = LiteraryTranslation(
         title=request.title,
         source_text=request.source_text,
@@ -230,7 +258,6 @@ async def create_literary_translation(
     db.commit()
     db.refresh(translation)
     
-    # 分割段落
     paragraphs = split_text_into_paragraphs(request.source_text)
     
     for idx, para_text in enumerate(paragraphs):
@@ -242,8 +269,6 @@ async def create_literary_translation(
         db.add(paragraph)
     
     db.commit()
-    
-    # 刷新并返回完整数据
     db.refresh(translation)
     return translation
 
@@ -334,7 +359,7 @@ async def delete_literary_translation(
 # ============================================================
 
 async def _execute_step1(translation_id: int, db: Session) -> None:
-    """执行第一步：初译"""
+    """执行第一步：初译（逐段翻译，每段完成即保存）"""
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
@@ -354,6 +379,7 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
         para.step1_translation = result
         para.translated_text = result
         full_step1.append(result)
+        db.commit()
     translation.step1_translation = "\n\n".join(full_step1)
     translation.current_step = 2
     translation.status = LiteraryTranslationStatus.VERIFYING
@@ -386,6 +412,7 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
         total_word += para.beauty_word_score
         total_meaning += para.beauty_meaning_score
         full_step2.append(verified)
+        db.commit()
     translation.step2_verification = "\n\n".join(full_step2)
     translation.current_step = 3
     translation.status = LiteraryTranslationStatus.REVISING
@@ -421,14 +448,18 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
         para.step3_revision = revised
         para.translated_text = revised
         full_step3.append(revised)
+        db.commit()
     translation.step3_revision = "\n\n".join(full_step3)
     translation.current_step = 4
     translation.status = LiteraryTranslationStatus.FINALIZING
     db.commit()
 
 
+STEP4_BATCH_CHARS = 6000
+
+
 async def _execute_step4(translation_id: int, db: Session) -> None:
-    """执行第四步：定稿 — 将所有段落整合为完整文章统一处理"""
+    """执行第四步：定稿 — 分批整合段落统一处理，支持大文件"""
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
     if not translation or translation.current_step < 4:
         raise HTTPException(status_code=400, detail="Please complete step 3 first")
@@ -438,30 +469,68 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
     ).order_by(LiteraryParagraph.paragraph_index).all()
 
     PARA_SEP = "\n\n"
-    full_source = PARA_SEP.join(p.source_text for p in paragraphs)
-    full_revised = PARA_SEP.join(
-        (p.step3_revision or p.translated_text or "") for p in paragraphs
+    total_chars = sum(len(p.step3_revision or p.translated_text or "") for p in paragraphs)
+
+    if total_chars <= STEP4_BATCH_CHARS:
+        full_source = PARA_SEP.join(p.source_text for p in paragraphs)
+        full_revised = PARA_SEP.join(
+            (p.step3_revision or p.translated_text or "") for p in paragraphs
+        )
+        result = await client.literary_finalize(
+            full_source, full_revised,
+            translation.source_lang, translation.target_lang, translation.literary_type
+        )
+        finalized_full = result.get("final_translation", full_revised)
+        finalized_parts = finalized_full.split(PARA_SEP)
+        for i, para in enumerate(paragraphs):
+            text = finalized_parts[i].strip() if i < len(finalized_parts) else (para.step3_revision or para.translated_text or "")
+            para.step4_finalization = text
+            para.translated_text = text
+        if len(finalized_parts) > len(paragraphs):
+            extra = PARA_SEP.join(finalized_parts[len(paragraphs):])
+            paragraphs[-1].step4_finalization += PARA_SEP + extra
+            paragraphs[-1].translated_text = paragraphs[-1].step4_finalization
+    else:
+        batches: list[list] = []
+        current_batch: list = []
+        current_size = 0
+        for para in paragraphs:
+            p_size = len(para.step3_revision or para.translated_text or "")
+            if current_size + p_size > STEP4_BATCH_CHARS and current_batch:
+                batches.append(current_batch)
+                current_batch = [para]
+                current_size = p_size
+            else:
+                current_batch.append(para)
+                current_size += p_size
+        if current_batch:
+            batches.append(current_batch)
+
+        for batch in batches:
+            batch_source = PARA_SEP.join(p.source_text for p in batch)
+            batch_revised = PARA_SEP.join(
+                (p.step3_revision or p.translated_text or "") for p in batch
+            )
+            result = await client.literary_finalize(
+                batch_source, batch_revised,
+                translation.source_lang, translation.target_lang, translation.literary_type
+            )
+            finalized_text = result.get("final_translation", batch_revised)
+            finalized_parts = finalized_text.split(PARA_SEP)
+            for i, para in enumerate(batch):
+                text = finalized_parts[i].strip() if i < len(finalized_parts) else (para.step3_revision or para.translated_text or "")
+                para.step4_finalization = text
+                para.translated_text = text
+            if len(finalized_parts) > len(batch):
+                extra = PARA_SEP.join(finalized_parts[len(batch):])
+                batch[-1].step4_finalization += PARA_SEP + extra
+                batch[-1].translated_text = batch[-1].step4_finalization
+
+    finalized_all = PARA_SEP.join(
+        (p.step4_finalization or p.translated_text or "") for p in paragraphs
     )
-
-    result = await client.literary_finalize(
-        full_source, full_revised,
-        translation.source_lang, translation.target_lang, translation.literary_type
-    )
-    finalized_full = result.get("final_translation", full_revised)
-
-    finalized_parts = finalized_full.split(PARA_SEP)
-    for i, para in enumerate(paragraphs):
-        text = finalized_parts[i].strip() if i < len(finalized_parts) else (para.step3_revision or para.translated_text or "")
-        para.step4_finalization = text
-        para.translated_text = text
-
-    if len(finalized_parts) > len(paragraphs):
-        extra = PARA_SEP.join(finalized_parts[len(paragraphs):])
-        paragraphs[-1].step4_finalization += PARA_SEP + extra
-        paragraphs[-1].translated_text = paragraphs[-1].step4_finalization
-
-    translation.step4_finalization = finalized_full
-    translation.final_translation = finalized_full
+    translation.step4_finalization = finalized_all
+    translation.final_translation = finalized_all
     translation.current_step = 4
     translation.status = LiteraryTranslationStatus.COMPLETED
     from datetime import datetime
@@ -491,6 +560,8 @@ async def _run_workflow_background(translation_id: int):
                 db.commit()
         except Exception:
             pass
+        import traceback
+        traceback.print_exc()
         print(f"[Workflow] Translation {translation_id} failed: {e}")
     finally:
         db.close()
@@ -643,11 +714,25 @@ async def get_workflow_status(
             step=step_num, step_name=step_name, status=step_status, result=truncated,
         ))
 
+    para_total = 0
+    para_done = 0
+    if running_step > 0:
+        all_paras = db.query(LiteraryParagraph).filter(
+            LiteraryParagraph.translation_id == translation_id
+        ).all()
+        para_total = len(all_paras)
+        step_field_map = {1: "step1_translation", 2: "step2_verification", 3: "step3_revision", 4: "step4_finalization"}
+        field = step_field_map.get(running_step)
+        if field:
+            para_done = sum(1 for p in all_paras if getattr(p, field, None))
+
     return LiteraryTranslationWorkflowResponse(
         translation_id=translation_id,
         current_step=translation.current_step,
         overall_status=translation.status,
-        steps=steps
+        steps=steps,
+        paragraph_total=para_total,
+        paragraph_done=para_done,
     )
 
 
@@ -1457,41 +1542,15 @@ def parse_text_file(content: bytes, file_type: str) -> str:
         raise ValueError(f"无法解析文件 ({ext}): {str(e)}")
 
 
-def split_long_text(text: str, max_chunk_size: int = 2000) -> List[str]:
+def split_long_text(text: str, max_chunk_size: int = MAX_PARAGRAPH_SIZE) -> List[str]:
     """
     将长文本分段，每段不超过 max_chunk_size 字符
-    尽量在段落边界处分割
+    尽量在段落边界处分割；单段超长时按句子边界拆
     """
-    if len(text) <= max_chunk_size:
-        return [text]
-    
-    chunks = []
-    # 先按段落分割
-    paragraphs = text.split('\n\n')
-    current_chunk = []
-    current_size = 0
-    
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-            
-        para_size = len(para) + 2  # +2 for '\n\n'
-        
-        if current_size + para_size > max_chunk_size and current_chunk:
-            # 保存当前块
-            chunks.append('\n\n'.join(current_chunk))
-            current_chunk = [para]
-            current_size = len(para)
-        else:
-            current_chunk.append(para)
-            current_size += para_size
-    
-    # 添加最后一块
-    if current_chunk:
-        chunks.append('\n\n'.join(current_chunk))
-    
-    return chunks
+    return split_text_into_paragraphs(text, max_chunk_size)
+
+
+MAX_UPLOAD_SIZE = 20 * 1024 * 1024
 
 
 @router.post("/parse-file")
@@ -1504,11 +1563,17 @@ async def parse_uploaded_file(file: UploadFile = File(...)):
     if ext not in SUPPORTED_UPLOAD_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
     content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件过大（{len(content) / 1024 / 1024:.1f}MB），最大支持 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"
+        )
     try:
         text = parse_text_file(content, ext)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"text": text, "filename": file.filename}
+    para_count = len(split_text_into_paragraphs(text))
+    return {"text": text, "filename": file.filename, "char_count": len(text), "paragraph_count": para_count}
 
 
 @router.post("/translations/upload")

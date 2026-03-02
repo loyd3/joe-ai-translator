@@ -126,26 +126,79 @@ class AIClient:
 
     PROFESSIONAL_TYPES = {"tech", "business", "trade", "legal", "medical"}
 
+    PROVIDER_BASE_URLS = {
+        "openai": "https://api.openai.com/v1",
+        "deepseek": "https://api.deepseek.com/v1",
+        "siliconflow": "https://api.siliconflow.cn/v1",
+    }
+
+    PROVIDER_DEFAULT_MODELS = {
+        "openai": "gpt-4",
+        "deepseek": "deepseek-chat",
+        "siliconflow": "deepseek-ai/DeepSeek-V3",
+    }
+
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self._client = None
         self._init_client()
 
-    def _init_client(self):
-        """根据配置的 provider 初始化对应的客户端"""
-        provider = self.settings.ai_provider
+    def _load_db_config(self):
+        """尝试从数据库加载配置，返回配置 dict 或 None"""
+        try:
+            from app.database import SessionLocal
+            from app.models.models import AIConfig
+            db = SessionLocal()
+            try:
+                cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
+                if cfg and cfg.api_key:
+                    return {
+                        "provider": cfg.provider,
+                        "api_key": cfg.api_key,
+                        "model": cfg.model,
+                        "base_url": cfg.base_url,
+                        "temperature": cfg.temperature,
+                        "max_tokens": cfg.max_tokens,
+                    }
+            finally:
+                db.close()
+        except Exception:
+            pass
+        return None
 
+    def _init_client(self):
+        """初始化客户端：优先使用数据库配置，否则使用 .env 配置"""
+        db_cfg = self._load_db_config()
+        self._db_temperature = None
+        self._db_max_tokens = None
+
+        if db_cfg:
+            provider = db_cfg["provider"]
+            api_key = db_cfg["api_key"]
+            base_url = db_cfg.get("base_url") or self.PROVIDER_BASE_URLS.get(provider, "")
+            self.model = db_cfg.get("model") or self.PROVIDER_DEFAULT_MODELS.get(provider, "")
+            if db_cfg.get("temperature") is not None:
+                self._db_temperature = db_cfg["temperature"]
+            if db_cfg.get("max_tokens") is not None:
+                self._db_max_tokens = db_cfg["max_tokens"]
+            if provider == "custom" and not base_url:
+                raise ValueError("Custom provider requires base_url")
+            self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+            print(f"[AIClient] Initialized from DB: provider={provider}, model={self.model}")
+            return
+
+        provider = self.settings.ai_provider
         if provider == "openai":
             api_key = self.settings.openai_api_key
-            base_url = "https://api.openai.com/v1"
+            base_url = self.PROVIDER_BASE_URLS["openai"]
             self.model = self.settings.openai_model or "gpt-4"
         elif provider == "deepseek":
             api_key = self.settings.deepseek_api_key
-            base_url = "https://api.deepseek.com/v1"
+            base_url = self.PROVIDER_BASE_URLS["deepseek"]
             self.model = self.settings.deepseek_model or "deepseek-chat"
         elif provider == "siliconflow":
             api_key = self.settings.siliconflow_api_key
-            base_url = "https://api.siliconflow.cn/v1"
+            base_url = self.PROVIDER_BASE_URLS["siliconflow"]
             self.model = self.settings.siliconflow_model or "deepseek-ai/DeepSeek-V3"
         elif provider == "custom":
             api_key = self.settings.custom_api_key
@@ -160,7 +213,22 @@ class AIClient:
             raise ValueError(f"API key not configured for provider: {provider}")
 
         self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
-        print(f"[AIClient] Initialized with provider: {provider}, model: {self.model}")
+        print(f"[AIClient] Initialized from .env: provider={provider}, model={self.model}")
+
+    def reload_from_db(self):
+        """重新从数据库加载配置并重新初始化客户端"""
+        self._client = None
+        self._init_client()
+
+    @property
+    def effective_max_tokens(self) -> int:
+        return self._db_max_tokens or self.settings.ai_max_tokens
+
+    @property
+    def effective_temperature(self) -> float:
+        if self._db_temperature is not None:
+            return self._db_temperature
+        return self.settings.ai_temperature
 
     @property
     def client(self):
@@ -219,8 +287,8 @@ Output only the translated text, no additional comments."""
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=temperature or self.settings.ai_temperature,
-            max_tokens=max_tokens or self.settings.ai_max_tokens,
+            temperature=temperature or self.effective_temperature,
+            max_tokens=max_tokens or self.effective_max_tokens,
         )
         return response.choices[0].message.content.strip()
 
@@ -239,8 +307,8 @@ Output only the translated text, no additional comments."""
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=temperature or self.settings.ai_temperature,
-            max_tokens=max_tokens or self.settings.ai_max_tokens,
+            temperature=temperature or self.effective_temperature,
+            max_tokens=max_tokens or self.effective_max_tokens,
             stream=True,
         )
         async for chunk in stream:
@@ -392,7 +460,7 @@ Output only the translated text, no additional comments."""
             model=self.model,
             messages=messages,
             temperature=temp,
-            max_tokens=self.settings.ai_max_tokens,
+            max_tokens=self.effective_max_tokens,
         )
         return response.choices[0].message.content.strip()
 
@@ -512,7 +580,7 @@ Output only the translated text, no additional comments."""
             model=self.model,
             messages=messages,
             temperature=0.3,
-            max_tokens=self.settings.ai_max_tokens,
+            max_tokens=self.effective_max_tokens,
             response_format={"type": "json_object"}
         )
         
@@ -633,7 +701,7 @@ Output only the translated text, no additional comments."""
             model=self.model,
             messages=messages,
             temperature=0.5,
-            max_tokens=self.settings.ai_max_tokens,
+            max_tokens=self.effective_max_tokens,
             response_format={"type": "json_object"}
         )
         
@@ -762,7 +830,7 @@ Output only the translated text, no additional comments."""
             model=self.model,
             messages=messages,
             temperature=0.3,
-            max_tokens=self.settings.ai_max_tokens,
+            max_tokens=self.effective_max_tokens,
             response_format={"type": "json_object"}
         )
         
@@ -899,7 +967,7 @@ Output only the translated text, no additional comments."""
             model=self.model,
             messages=messages,
             temperature=0.3,
-            max_tokens=self.settings.ai_max_tokens,
+            max_tokens=self.effective_max_tokens,
             response_format={"type": "json_object"}
         )
 

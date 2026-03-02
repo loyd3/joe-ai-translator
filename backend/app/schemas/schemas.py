@@ -282,6 +282,8 @@ class LiteraryTranslationWorkflowResponse(BaseModel):
     current_step: int
     overall_status: str
     steps: List[WorkflowStepResponse]
+    paragraph_total: int = 0
+    paragraph_done: int = 0
 
 
 class ExportTranslationRequest(BaseModel):

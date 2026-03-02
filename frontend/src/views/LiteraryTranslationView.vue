@@ -5,7 +5,7 @@
       <div class="sidebar-header">
         <div class="brand-wrap">
           <span class="brand">译智通</span>
-          <span class="brand-sub">文学翻译为主</span>
+          <span class="brand-sub">为翻译而生</span>
         </div>
         <div class="header-btns">
           <el-button v-if="batchMode" text size="small" @click="exitBatchMode">取消</el-button>
@@ -64,6 +64,12 @@
         </div>
         <el-empty v-if="filteredTaskList.length === 0" description="暂无任务" :image-size="60" />
       </div>
+
+      <div class="sidebar-footer" @click="openSettings">
+        <el-icon><Setting /></el-icon>
+        <span>大模型配置</span>
+        <el-tag v-if="aiConfigInfo.provider" size="small" type="info" effect="plain" round>{{ aiConfigInfo.provider }}</el-tag>
+      </div>
     </div>
 
     <!-- 主内容区 -->
@@ -115,6 +121,10 @@
                 {{ getStatusText(currentTask.status) }}
               </el-button>
               <el-tag v-else-if="currentTask.status === 'completed'" type="success" size="small" effect="dark" round>已完成</el-tag>
+
+              <el-tag v-if="isWorkflowRunning && paraProgress.total > 0" size="small" type="info" effect="plain" round>
+                {{ paraProgress.done }}/{{ paraProgress.total }} 段
+              </el-tag>
             </div>
 
             <div class="bar-right">
@@ -281,6 +291,12 @@
             </el-button>
           </el-upload>
           <el-input v-model="newTaskForm.source_text" type="textarea" :rows="8" placeholder="粘贴要翻译的文本，或上传文件自动填入..." />
+          <div class="text-stats" v-if="newTaskForm.source_text.length > 0">
+            <span>{{ newTaskForm.source_text.length.toLocaleString() }} 字符</span>
+            <span>·</span>
+            <span>约 {{ estimatedParagraphs }} 段</span>
+            <el-tag v-if="newTaskForm.source_text.length > 10000" size="small" type="info" effect="plain">大文本自动智能分段</el-tag>
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -307,6 +323,60 @@
         <el-button type="primary" @click="submitEditTask">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 大模型配置对话框 -->
+    <el-dialog v-model="showSettings" title="大模型配置" width="520px" destroy-on-close>
+      <el-form :model="aiConfigForm" label-position="top">
+        <el-form-item label="AI 提供商">
+          <el-select v-model="aiConfigForm.provider" style="width: 100%;" @change="onProviderChange">
+            <el-option label="DeepSeek" value="deepseek" />
+            <el-option label="OpenAI" value="openai" />
+            <el-option label="SiliconFlow (硅基流动)" value="siliconflow" />
+            <el-option label="自定义 (Custom)" value="custom" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="API Key">
+          <el-input
+            v-model="aiConfigForm.api_key"
+            :placeholder="aiConfigInfo.has_api_key ? `已配置 (${aiConfigInfo.api_key_masked})` : '请输入 API Key'"
+            show-password
+          />
+          <div class="form-hint" v-if="aiConfigInfo.has_api_key && !aiConfigForm.api_key">
+            已有密钥，留空则保持不变
+          </div>
+        </el-form-item>
+        <el-form-item label="模型名称">
+          <el-input v-model="aiConfigForm.model" :placeholder="getDefaultModel(aiConfigForm.provider)" />
+          <div class="form-hint">
+            留空使用默认: {{ getDefaultModel(aiConfigForm.provider) }}
+          </div>
+        </el-form-item>
+        <el-form-item v-if="aiConfigForm.provider === 'custom'" label="API 地址">
+          <el-input v-model="aiConfigForm.base_url" placeholder="https://your-api.com/v1" />
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="温度 (Temperature)">
+              <el-input-number v-model="aiConfigForm.temperature" :min="0" :max="2" :step="0.1" :precision="1" style="width: 100%;" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="最大 Token">
+              <el-input-number v-model="aiConfigForm.max_tokens" :min="256" :max="128000" :step="1024" style="width: 100%;" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <div class="config-source" v-if="aiConfigInfo.source">
+          <el-tag size="small" :type="aiConfigInfo.source === 'database' ? 'success' : 'info'" effect="plain">
+            {{ aiConfigInfo.source === 'database' ? '使用自定义配置' : '使用默认配置' }}
+          </el-tag>
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="showSettings = false">取消</el-button>
+        <el-button type="primary" @click="saveAIConfig" :loading="savingConfig">保存配置</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -314,8 +384,8 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Upload, Document, Plus, List } from '@element-plus/icons-vue'
-import { literaryApi, translateApi } from '@/api'
+import { Edit, Delete, Upload, Document, Plus, List, Setting } from '@element-plus/icons-vue'
+import { literaryApi, translateApi, systemApi } from '@/api'
 import TermLibraryPanel from '@/components/TermLibraryPanel.vue'
 
 const languages = ref<{ code: string; name: string }[]>([])
@@ -343,6 +413,80 @@ const batchStarting = ref(false)
 const LITERARY_TYPES = new Set(['poetry', 'prose', 'novel', 'drama', 'general'])
 const categoryGroup = ref<string>('literary')
 
+const showSettings = ref(false)
+const savingConfig = ref(false)
+const aiConfigInfo = ref<any>({ provider: '', source: '', has_api_key: false, api_key_masked: '' })
+const aiConfigForm = ref({
+  provider: 'deepseek',
+  api_key: '',
+  model: '',
+  base_url: '',
+  temperature: 0.3,
+  max_tokens: 4096,
+})
+
+const DEFAULT_MODELS: Record<string, string> = {
+  openai: 'gpt-4',
+  deepseek: 'deepseek-chat',
+  siliconflow: 'deepseek-ai/DeepSeek-V3',
+  custom: '',
+}
+
+function getDefaultModel(provider: string) {
+  return DEFAULT_MODELS[provider] || ''
+}
+
+function onProviderChange(_provider: string) {
+  aiConfigForm.value.model = ''
+  aiConfigForm.value.base_url = ''
+}
+
+async function loadAIConfig() {
+  try {
+    const res = await systemApi.getAIConfig()
+    aiConfigInfo.value = res.data
+  } catch { /* ignore */ }
+}
+
+function openSettings() {
+  loadAIConfig().then(() => {
+    const info = aiConfigInfo.value
+    aiConfigForm.value = {
+      provider: info.provider || 'deepseek',
+      api_key: '',
+      model: info.model || '',
+      base_url: info.base_url || '',
+      temperature: info.temperature ?? 0.3,
+      max_tokens: info.max_tokens || 4096,
+    }
+    showSettings.value = true
+  })
+}
+
+async function saveAIConfig() {
+  savingConfig.value = true
+  try {
+    const payload: any = {
+      provider: aiConfigForm.value.provider,
+      model: aiConfigForm.value.model || undefined,
+      base_url: aiConfigForm.value.base_url || undefined,
+      temperature: aiConfigForm.value.temperature,
+      max_tokens: aiConfigForm.value.max_tokens,
+    }
+    if (aiConfigForm.value.api_key) {
+      payload.api_key = aiConfigForm.value.api_key
+    }
+    await systemApi.updateAIConfig(payload)
+    ElMessage.success('配置已保存')
+    showSettings.value = false
+    await loadAIConfig()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '保存失败')
+  } finally {
+    savingConfig.value = false
+  }
+}
+
 const filteredTaskList = computed(() => {
   if (categoryGroup.value === 'all') return taskList.value
   if (categoryGroup.value === 'literary') return taskList.value.filter((t: any) => LITERARY_TYPES.has(t.literary_type || 'general'))
@@ -365,6 +509,19 @@ const newTaskForm = ref({
   user_requirements: ''
 })
 const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
+const MAX_FILE_SIZE = 10 * 1024 * 1024
+const MAX_TEXT_CHARS = 500000
+
+const estimatedParagraphs = computed(() => {
+  const text = newTaskForm.value.source_text
+  if (!text) return 0
+  const paras = text.split(/\n\n+/).filter((p: string) => p.trim())
+  let count = 0
+  for (const p of paras) {
+    count += Math.max(1, Math.ceil(p.length / 2000))
+  }
+  return count || 1
+})
 
 const router = useRouter()
 const targetLanguages = computed(() => languages.value.filter(l => l.code !== 'auto'))
@@ -384,6 +541,8 @@ const canStartWorkflow = computed(() => {
 const isWorkflowRunning = computed(() =>
   ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
 )
+
+const paraProgress = ref<{ total: number; done: number }>({ total: 0, done: 0 })
 
 const stepItems = computed(() => {
   const labels = ['翻译', '校验', '修改', '定稿']
@@ -418,6 +577,7 @@ const step4Available = computed(() => currentTask.value?.step4_finalization)
 
 onMounted(async () => {
   loadLanguages()
+  loadAIConfig()
   await loadTasks(true)
   if (taskList.value.some((t: any) => isTaskRunning(t.status))) startBatchPolling()
 })
@@ -475,6 +635,10 @@ const binaryUploadExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw'])
 const onCreateFileSelect = async (opts: { raw: File }) => {
   const file = opts?.raw
   if (!file) return
+  if (file.size > MAX_FILE_SIZE) {
+    ElMessage.warning(`文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB），最大支持 ${MAX_FILE_SIZE / 1024 / 1024}MB`)
+    return
+  }
   const ext = file.name.split('.').pop()?.toLowerCase()
   if (!ext || !allowedUploadExtensions.has(ext)) {
     ElMessage.warning('请选择支持的文件格式')
@@ -485,7 +649,13 @@ const onCreateFileSelect = async (opts: { raw: File }) => {
       const form = new FormData()
       form.append('file', file)
       const res = await literaryApi.parseFile(form)
-      newTaskForm.value.source_text = res.data?.text ?? ''
+      const text = res.data?.text ?? ''
+      if (text.length > MAX_TEXT_CHARS) {
+        ElMessage.warning(`文件内容过长（${(text.length / 10000).toFixed(1)}万字），已截取前 ${MAX_TEXT_CHARS / 10000} 万字符`)
+        newTaskForm.value.source_text = text.slice(0, MAX_TEXT_CHARS)
+      } else {
+        newTaskForm.value.source_text = text
+      }
       if (!newTaskForm.value.title) newTaskForm.value.title = (file.name || '').replace(/\.[^.]+$/, '')
       if (newTaskForm.value.source_text) ElMessage.success('文件已解析')
     } catch (e) {
@@ -495,7 +665,12 @@ const onCreateFileSelect = async (opts: { raw: File }) => {
   }
   const reader = new FileReader()
   reader.onload = () => {
-    newTaskForm.value.source_text = (reader.result as string) || ''
+    let text = (reader.result as string) || ''
+    if (text.length > MAX_TEXT_CHARS) {
+      ElMessage.warning(`文件内容过长（${(text.length / 10000).toFixed(1)}万字），已截取前 ${MAX_TEXT_CHARS / 10000} 万字符`)
+      text = text.slice(0, MAX_TEXT_CHARS)
+    }
+    newTaskForm.value.source_text = text
     if (!newTaskForm.value.title) newTaskForm.value.title = file.name.replace(/\.[^.]+$/, '')
   }
   reader.readAsText(file, 'UTF-8')
@@ -637,10 +812,13 @@ const startPolling = () => {
       const taskInList = taskList.value.find((t: any) => t.id === currentTask.value.id)
       if (taskInList) { taskInList.status = data.overall_status; taskInList.current_step = data.current_step }
 
+      paraProgress.value = { total: data.paragraph_total || 0, done: data.paragraph_done || 0 }
+
       if (data.current_step !== prevStep) await refreshTask()
 
       if (data.overall_status === 'completed' || data.overall_status === 'failed') {
         stopPolling()
+        paraProgress.value = { total: 0, done: 0 }
         await refreshTask()
         await loadTasks()
         ElMessage[data.overall_status === 'completed' ? 'success' : 'error'](
@@ -781,6 +959,25 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
       width: 100%;
     }
   }
+}
+
+.sidebar-footer {
+  padding: 12px 18px;
+  border-top: 1px solid #f0f0f0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #888;
+  flex-shrink: 0;
+  transition: background .2s;
+  &:hover {
+    background: #f5f5f5;
+    color: #555;
+  }
+  .el-icon { font-size: 16px; }
+  .el-tag { margin-left: auto; }
 }
 
 .task-list {
@@ -1018,5 +1215,26 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 
 .inline-upload {
   margin-bottom: 8px;
+}
+
+.text-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #999;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: #aaa;
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.config-source {
+  margin-top: 8px;
+  text-align: right;
 }
 </style>

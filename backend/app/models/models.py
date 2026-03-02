@@ -235,3 +235,17 @@ class TranslationTermSummary(Base):
     
     # 关联
     translation = relationship("LiteraryTranslation")
+
+
+class AIConfig(Base):
+    """大模型配置（单行表，id 固定为 1）"""
+    __tablename__ = "ai_config"
+
+    id = Column(Integer, primary_key=True, default=1)
+    provider = Column(String(50), nullable=False, default="deepseek", comment="AI 提供商: openai, deepseek, siliconflow, custom")
+    api_key = Column(String(500), nullable=True, comment="API Key")
+    model = Column(String(200), nullable=True, comment="模型名称")
+    base_url = Column(String(500), nullable=True, comment="自定义 API 地址（custom 提供商时必填）")
+    temperature = Column(Float, nullable=True, comment="温度参数")
+    max_tokens = Column(Integer, nullable=True, comment="最大 token 数")
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

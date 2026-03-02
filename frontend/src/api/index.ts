@@ -60,6 +60,15 @@ export const translateApi = {
 export const systemApi = {
   getConfig: () => api.get('/system/config'),
   healthCheck: () => api.get('/system/health'),
+  getAIConfig: () => api.get('/system/ai-config'),
+  updateAIConfig: (data: {
+    provider: string;
+    api_key?: string;
+    model?: string;
+    base_url?: string;
+    temperature?: number;
+    max_tokens?: number;
+  }) => api.put('/system/ai-config', data),
 }
 
 // 文学翻译 API

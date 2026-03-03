@@ -1,14 +1,18 @@
 #!/bin/bash
 # ============================================
 # AI Translator - 一键更新并重启 Docker
-# 
+#
 # 功能：
 #   1. 构建新的 Docker 镜像
-#   2. 推送到 Docker Hub
+#   2. （可选）推送到 Docker Hub
 #   3. 重启本地 Docker 容器
 #
-# 用法: ./docker-update.sh [版本号]
-# 示例: ./docker-update.sh 1.0.1
+# 用法:
+#   ./docker-update.sh [版本号]        # 构建 + 推送 + 重启（需先 docker login）
+#   ./docker-update.sh --local [版本号] # 仅本地构建 + 重启（无需登录 Docker Hub）
+# 示例:
+#   ./docker-update.sh 1.0.1
+#   ./docker-update.sh --local
 # ============================================
 
 set -e
@@ -26,29 +30,45 @@ BACKEND_IMAGE="${DOCKER_USER}/joe-ai-translator-backend"
 FRONTEND_IMAGE="${DOCKER_USER}/joe-ai-translator-frontend"
 COMPOSE_FILE="docker-compose.local-db.yml"
 
-# 获取版本号
-VERSION=${1:-latest}
+# 解析参数：--local 表示仅本地构建，不推送
+PUSH_TO_HUB=true
+VERSION="latest"
+for arg in "$@"; do
+    if [ "$arg" = "--local" ]; then
+        PUSH_TO_HUB=false
+    elif [ "$arg" != "" ] && [ "$arg" != "--local" ]; then
+        VERSION="$arg"
+    fi
+done
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  AI Translator - Docker 更新脚本${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "版本: ${YELLOW}${VERSION}${NC}"
+if [ "$PUSH_TO_HUB" = false ]; then
+    echo -e "模式: ${YELLOW}仅本地（不推送 Docker Hub）${NC}"
+fi
 echo ""
 
-# 检查 docker 登录状态
-echo -e "${BLUE}▶ 检查 Docker 登录状态...${NC}"
+# 检查 Docker 是否运行
+echo -e "${BLUE}▶ 检查 Docker...${NC}"
 if ! docker info > /dev/null 2>&1; then
     echo -e "${RED}✗ Docker 未运行${NC}"
     exit 1
 fi
+echo -e "${GREEN}✓ Docker 已就绪${NC}"
 
-if ! docker info 2>/dev/null | grep -q "Username"; then
-    echo -e "${RED}✗ 未登录到 Docker Hub${NC}"
-    echo "请先运行: docker login"
-    exit 1
+# 仅在需要推送时检查 Docker Hub 登录
+if [ "$PUSH_TO_HUB" = true ]; then
+    echo -e "${BLUE}▶ 检查 Docker Hub 登录状态...${NC}"
+    if ! docker info 2>/dev/null | grep -q "Username"; then
+        echo -e "${RED}✗ 未登录到 Docker Hub${NC}"
+        echo "请先运行: docker login"
+        echo "或仅本地构建: ./docker-update.sh --local"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Docker Hub 已登录${NC}"
 fi
-
-echo -e "${GREEN}✓ Docker 已登录${NC}"
 echo ""
 
 # 停止现有容器
@@ -69,19 +89,19 @@ echo ""
 echo -e "${GREEN}✓ 镜像构建完成${NC}"
 echo ""
 
-# 推送镜像到 Docker Hub
-echo -e "${BLUE}▶ 推送后端镜像到 Docker Hub...${NC}"
-docker push ${BACKEND_IMAGE}:${VERSION}
-docker push ${BACKEND_IMAGE}:latest
-
-echo ""
-echo -e "${BLUE}▶ 推送前端镜像到 Docker Hub...${NC}"
-docker push ${FRONTEND_IMAGE}:${VERSION}
-docker push ${FRONTEND_IMAGE}:latest
-
-echo ""
-echo -e "${GREEN}✓ 镜像推送完成${NC}"
-echo ""
+# 按需推送到 Docker Hub
+if [ "$PUSH_TO_HUB" = true ]; then
+    echo -e "${BLUE}▶ 推送后端镜像到 Docker Hub...${NC}"
+    docker push ${BACKEND_IMAGE}:${VERSION}
+    docker push ${BACKEND_IMAGE}:latest
+    echo ""
+    echo -e "${BLUE}▶ 推送前端镜像到 Docker Hub...${NC}"
+    docker push ${FRONTEND_IMAGE}:${VERSION}
+    docker push ${FRONTEND_IMAGE}:latest
+    echo ""
+    echo -e "${GREEN}✓ 镜像推送完成${NC}"
+    echo ""
+fi
 
 # 启动新容器
 echo -e "${BLUE}▶ 启动新容器...${NC}"

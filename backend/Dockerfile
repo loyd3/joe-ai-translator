@@ -13,11 +13,18 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 安装迁移脚本依赖
+RUN pip install --no-cache-dir pymysql
+
 # 复制代码
 COPY . .
 
 # 暴露端口
 EXPOSE 8000
 
-# 启动命令
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 复制启动脚本
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# 启动命令（先执行迁移，再启动服务）
+CMD ["/app/start.sh"]

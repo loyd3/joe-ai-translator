@@ -3,7 +3,22 @@ CREATE DATABASE IF NOT EXISTS aitranslator
     CHARACTER SET utf8mb4
     COLLATE utf8mb4_unicode_ci;
 
-USE aitranslator;-- ========================================================-- 翻译历史记录表-- ========================================================
+USE aitranslator;-- ========================================================-- 用户表（认证用）-- ========================================================DROP TABLE IF EXISTS users;
+
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    email VARCHAR(255) NOT NULL UNIQUE COMMENT '邮箱',
+    hashed_password VARCHAR(255) NOT NULL COMMENT '密码哈希',
+    display_name VARCHAR(100) NULL COMMENT '显示名称',
+    is_active TINYINT(1) DEFAULT 1 COMMENT '是否激活',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at TIMESTAMP NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    INDEX idx_email (email),
+    INDEX idx_is_active (is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表';
+
+-- ========================================================-- 翻译历史记录表-- ========================================================
 DROP TABLE IF EXISTS translation_history;
 
 CREATE TABLE translation_history (
@@ -73,7 +88,7 @@ CREATE TABLE literary_translations (
     ai_model VARCHAR(100) NULL COMMENT 'AI模型',
     
     -- 参考文档关联
-    reference_document_ids JSON DEFAULT '[]' COMMENT '关联的参考文档ID列表',
+    reference_document_ids JSON NULL COMMENT '关联的参考文档ID列表',
     
     -- 用户翻译前指明的需求（风格、术语等）
     user_requirements TEXT NULL COMMENT '用户翻译需求说明',

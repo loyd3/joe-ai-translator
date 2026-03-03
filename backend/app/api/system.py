@@ -2,15 +2,20 @@
 系统配置 API（与用户绑定，需 token）
 """
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+import logging
 from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
+
 from app.core.ai_client import get_settings, get_ai_client
 from app.core.auth import get_current_user
 from app.database import get_db
 from app.models.models import AIConfig, User
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/system", tags=["system"])
 
 
@@ -28,7 +33,16 @@ async def get_config(
     current_user: User = Depends(get_current_user),
 ):
     """获取系统配置（安全信息已脱敏，按当前用户）"""
-    db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
+    try:
+        db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
+    except OperationalError as e:
+        logger.exception("ai_config table query failed: %s", e)
+        err_msg = str(getattr(e, "orig", e))
+        if "user_id" in err_msg and "ai_config" in err_msg:
+            detail = "ai_config 表缺少 user_id 列。请执行: mysql -u root -p aitranslator < backend/migrations/add_user_id_to_ai_config.sql"
+        else:
+            detail = "配置表暂不可用。请重启后端以自动建表，或执行: mysql -u root -p aitranslator < backend/migrations/create_ai_config.sql"
+        raise HTTPException(status_code=503, detail=detail)
     settings = get_settings()
     if db_cfg and db_cfg.api_key:
         provider = db_cfg.provider
@@ -63,13 +77,34 @@ class AIConfigUpdate(BaseModel):
     max_tokens: Optional[int] = None
 
 
+def _env_model_value(settings) -> str:
+    """从 settings 取当前 provider 对应的 model 字符串，避免 KeyError 或类型异常"""
+    provider = getattr(settings, "ai_provider", "deepseek") or "deepseek"
+    model_map = {
+        "openai": getattr(settings, "openai_model", "gpt-4"),
+        "deepseek": getattr(settings, "deepseek_model", "deepseek-chat"),
+        "siliconflow": getattr(settings, "siliconflow_model", "deepseek-ai/DeepSeek-V3"),
+        "custom": getattr(settings, "custom_model", ""),
+    }
+    return model_map.get(provider, "") if isinstance(model_map.get(provider), str) else str(model_map.get(provider, ""))
+
+
 @router.get("/ai-config")
 async def get_ai_config(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """获取大模型配置（API Key 脱敏，按当前用户）"""
-    db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
+    try:
+        db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
+    except OperationalError as e:
+        logger.exception("ai_config table query failed: %s", e)
+        err_msg = str(getattr(e, "orig", e))
+        if "user_id" in err_msg and "ai_config" in err_msg:
+            detail = "ai_config 表缺少 user_id 列。请执行: mysql -u root -p aitranslator < backend/migrations/add_user_id_to_ai_config.sql"
+        else:
+            detail = "配置表暂不可用。请重启后端以自动建表，或执行: mysql -u root -p aitranslator < backend/migrations/create_ai_config.sql"
+        raise HTTPException(status_code=503, detail=detail)
     settings = get_settings()
     if db_cfg:
         masked_key = ""
@@ -86,19 +121,17 @@ async def get_ai_config(
             "max_tokens": db_cfg.max_tokens or settings.ai_max_tokens,
             "source": "database",
         }
+    provider = getattr(settings, "ai_provider", "deepseek") or "deepseek"
+    api_key_attr = f"{provider}_api_key" if provider in ("openai", "deepseek", "siliconflow", "custom") else "deepseek_api_key"
+    has_key = bool(getattr(settings, api_key_attr, None))
     return {
-        "provider": settings.ai_provider,
+        "provider": provider,
         "api_key_masked": "",
-        "has_api_key": bool(getattr(settings, f"{settings.ai_provider}_api_key", None)),
-        "model": {
-            "openai": settings.openai_model,
-            "deepseek": settings.deepseek_model,
-            "siliconflow": settings.siliconflow_model,
-            "custom": settings.custom_model,
-        }.get(settings.ai_provider, ""),
-        "base_url": settings.custom_base_url or "",
-        "temperature": settings.ai_temperature,
-        "max_tokens": settings.ai_max_tokens,
+        "has_api_key": has_key,
+        "model": _env_model_value(settings),
+        "base_url": getattr(settings, "custom_base_url", "") or "",
+        "temperature": getattr(settings, "ai_temperature", 0.3),
+        "max_tokens": getattr(settings, "ai_max_tokens", 4096),
         "source": "env",
     }
 

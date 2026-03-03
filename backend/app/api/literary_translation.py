@@ -338,10 +338,10 @@ async def list_literary_translations(
     except OperationalError as e:
         err_msg = str(getattr(e, "orig", e))
         if "Unknown column" in err_msg:
-            raise HTTPException(
-                status_code=503,
-                detail="Database schema is outdated. From project root run: mysql -u root -p aitranslator < backend/migrations/schema_update_literary_translations.sql"
-            )
+            hint = "Database schema is outdated. Run migration: mysql -u root -p aitranslator < backend/migrations/schema_update_literary_translations.sql"
+            if "user_id" in err_msg:
+                hint = "Missing user_id column. Run: mysql -u root -p aitranslator < backend/migrations/add_user_id_to_literary.sql"
+            raise HTTPException(status_code=503, detail=hint)
         raise
 
 

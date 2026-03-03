@@ -24,10 +24,8 @@ services:
     container_name: ai-translator-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-Lord2013}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-aitranslator}
-      MYSQL_USER: ${MYSQL_USER:-aitranslator}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-aitranslator123}
       TZ: Asia/Shanghai
     volumes:
       - mysql_translator_data:/var/lib/mysql
@@ -36,7 +34,7 @@ services:
       # 映射到 3308，避免与本地 3306 和 writer 3307 冲突
       - "3308:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD:-Lord2013}"]
       timeout: 20s
       retries: 10
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
@@ -52,9 +50,20 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      # 挂载 migrations 目录，使容器能访问 SQL 文件
+      - ./backend/migrations:/app/migrations:ro
     environment:
-      # 连接 Docker 内部的 MySQL
-      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-aitranslator}:${MYSQL_PASSWORD:-aitranslator123}@mysql:3306/${MYSQL_DATABASE:-aitranslator}?charset=utf8mb4
+      # MySQL 连接配置（覆盖 .env 中的 localhost 配置）
+      # 使用 root 用户连接 MySQL
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      # 从 .env 的 MYSQL_PASSWORD 读取，默认 Lord2013
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-Lord2013}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-aitranslator}
+      # 连接 Docker 内部的 MySQL（使用 root 用户）
+      DATABASE_URL: mysql+pymysql://root:${MYSQL_PASSWORD:-Lord2013}@mysql:3306/${MYSQL_DATABASE:-aitranslator}?charset=utf8mb4
       # AI 配置从 .env 读取
       AI_PROVIDER: ${AI_PROVIDER:-deepseek}
       AI_TEMPERATURE: ${AI_TEMPERATURE:-0.3}
@@ -91,8 +100,8 @@ services:
     container_name: ai-translator-frontend
     restart: unless-stopped
     environment:
-      # 指向 Docker 后端端口 8002
-      - VITE_API_URL=http://localhost:8002
+      # Vite 代理目标（使用 Docker 内部网络访问后端）
+      - VITE_API_PROXY_TARGET=http://backend:8000
     ports:
       # 映射到 8081，避免与本地 5173 和 writer 8080 冲突
       - "8081:5173"

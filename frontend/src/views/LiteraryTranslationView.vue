@@ -85,7 +85,7 @@
 
       <!-- 工作区 -->
       <template v-else>
-        <div class="workspace">
+        <div class="workspace" v-loading="workflowLoading">
           <!-- 顶栏 -->
           <div class="top-bar">
             <div class="bar-left">
@@ -117,10 +117,12 @@
               <el-button v-if="canStartWorkflow" type="primary" size="small" @click="startWorkflow" :loading="processing">
                 {{ currentTask.status === 'failed' ? '重新翻译' : '开始翻译' }}
               </el-button>
-              <el-button v-else-if="isWorkflowRunning" type="primary" size="small" loading disabled>
-                {{ getStatusText(currentTask.status) }}
+              <el-button v-else-if="isWorkflowRunning" type="danger" size="small" @click="stopWorkflow" :loading="processing">
+                终止流程
               </el-button>
+              <el-tag v-if="isWorkflowRunning" type="warning" size="small" effect="dark" round>{{ getStatusText(currentTask.status) }}</el-tag>
               <el-tag v-else-if="currentTask.status === 'completed'" type="success" size="small" effect="dark" round>已完成</el-tag>
+              <el-tag v-if="workflowLoading" size="small" type="info" effect="plain" round>工作流加载中</el-tag>
 
               <el-tag v-if="isWorkflowRunning && paraProgress.total > 0" size="small" type="info" effect="plain" round>
                 {{ paraProgress.done }}/{{ paraProgress.total }} 段
@@ -543,6 +545,7 @@ const isWorkflowRunning = computed(() =>
 )
 
 const paraProgress = ref<{ total: number; done: number }>({ total: 0, done: 0 })
+const workflowLoading = ref(false)
 
 const stepItems = computed(() => {
   const labels = ['翻译', '校验', '润色', '定稿']
@@ -578,8 +581,8 @@ const step4Available = computed(() => currentTask.value?.step4_finalization)
 onMounted(async () => {
   loadLanguages()
   loadAIConfig()
-  await loadTasks(true)
-  if (taskList.value.some((t: any) => isTaskRunning(t.status))) startBatchPolling()
+  loadTasks()
+  startBatchPolling()
 })
 
 const loadLanguages = async () => {
@@ -608,6 +611,7 @@ const loadTasks = async (autoSelect = false) => {
 
 const selectTask = async (task: any) => {
   stopPolling()
+  workflowLoading.value = true
   try {
     const response = await literaryApi.getTranslation(task.id, true)
     currentTask.value = response.data
@@ -619,8 +623,10 @@ const selectTask = async (task: any) => {
     if (isWorkflowRunning.value) {
       startPolling()
     }
+    workflowLoading.value = false
   } catch (error) {
     ElMessage.error('加载任务失败')
+    workflowLoading.value = false
   }
 }
 
@@ -787,9 +793,27 @@ const startWorkflow = async () => {
     await literaryApi.startWorkflow(currentTask.value.id)
     currentTask.value.status = 'translating'
     currentTask.value.current_step = 1
+    workflowLoading.value = true
     startPolling()
   } catch (error: any) {
     const msg = error?.response?.data?.detail || '启动翻译失败'
+    ElMessage.error(msg)
+  } finally {
+    processing.value = false
+  }
+}
+
+const stopWorkflow = async () => {
+  processing.value = true
+  try {
+    await literaryApi.stopWorkflow(currentTask.value.id)
+    stopPolling()
+    paraProgress.value = { total: 0, done: 0 }
+    await refreshTask()
+    await loadTasks()
+    ElMessage.success('已终止')
+  } catch (error: any) {
+    const msg = error?.response?.data?.detail || '中止失败'
     ElMessage.error(msg)
   } finally {
     processing.value = false
@@ -804,6 +828,7 @@ const startPolling = () => {
     try {
       const res = await literaryApi.getWorkflowStatus(currentTask.value.id)
       const data = res.data
+      workflowLoading.value = false
       const prevStep = lastPolledStep
       currentTask.value.status = data.overall_status
       currentTask.value.current_step = data.current_step
@@ -828,7 +853,7 @@ const startPolling = () => {
     } catch (error) {
       console.error('Polling error:', error)
     }
-  }, 3000)
+  }, 12000)
 }
 
 const stopPolling = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null } }
@@ -850,7 +875,7 @@ const startBatchPolling = () => {
         if (updated && updated.status !== currentTask.value.status) await refreshTask()
       }
     } catch { /* ignore */ }
-  }, 4000)
+  }, 20000)
 }
 
 const stopBatchPolling = () => { if (batchPollTimer) { clearInterval(batchPollTimer); batchPollTimer = null } }

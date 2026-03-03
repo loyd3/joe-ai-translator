@@ -36,6 +36,10 @@ from app.core.ai_client import get_ai_client
 
 router = APIRouter(prefix="/api/literary", tags=["literary-translation"])
 
+class WorkflowCancelled(Exception):
+    pass
+
+CANCELLED_TRANSLATIONS: set[int] = set()
 
 # ============================================================
 # 参考文档管理
@@ -401,6 +405,11 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
     reference_content = get_reference_and_requirements(translation, db)
     full_step1 = []
     for para in paragraphs:
+        if translation_id in CANCELLED_TRANSLATIONS:
+            translation.status = LiteraryTranslationStatus.FAILED
+            translation.error_message = "Cancelled by user"
+            db.commit()
+            raise WorkflowCancelled()
         source_text = _sanitize_text_for_api(para.source_text or "")
         ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
         result = await client.literary_translate(
@@ -429,6 +438,11 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
     full_step2 = []
     total_sound, total_word, total_meaning = 0, 0, 0
     for para in paragraphs:
+        if translation_id in CANCELLED_TRANSLATIONS:
+            translation.status = LiteraryTranslationStatus.FAILED
+            translation.error_message = "Cancelled by user"
+            db.commit()
+            raise WorkflowCancelled()
         result = await client.literary_verify(
             para.source_text, para.step1_translation or para.translated_text or "",
             translation.source_lang, translation.target_lang, translation.literary_type
@@ -465,6 +479,11 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
     ).order_by(LiteraryParagraph.paragraph_index).all()
     full_step3 = []
     for para in paragraphs:
+        if translation_id in CANCELLED_TRANSLATIONS:
+            translation.status = LiteraryTranslationStatus.FAILED
+            translation.error_message = "Cancelled by user"
+            db.commit()
+            raise WorkflowCancelled()
         verification_analysis = {
             "issues_found": [], "suggestions": [],
             "beauty_sound_score": para.beauty_sound_score,
@@ -503,6 +522,11 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
     total_chars = sum(len(p.step3_revision or p.translated_text or "") for p in paragraphs)
 
     if total_chars <= STEP4_BATCH_CHARS:
+        if translation_id in CANCELLED_TRANSLATIONS:
+            translation.status = LiteraryTranslationStatus.FAILED
+            translation.error_message = "Cancelled by user"
+            db.commit()
+            raise WorkflowCancelled()
         full_source = PARA_SEP.join(p.source_text for p in paragraphs)
         full_revised = PARA_SEP.join(
             (p.step3_revision or p.translated_text or "") for p in paragraphs
@@ -538,6 +562,11 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
             batches.append(current_batch)
 
         for batch in batches:
+            if translation_id in CANCELLED_TRANSLATIONS:
+                translation.status = LiteraryTranslationStatus.FAILED
+                translation.error_message = "Cancelled by user"
+                db.commit()
+                raise WorkflowCancelled()
             batch_source = PARA_SEP.join(p.source_text for p in batch)
             batch_revised = PARA_SEP.join(
                 (p.step3_revision or p.translated_text or "") for p in batch
@@ -599,6 +628,18 @@ async def _run_workflow_background(translation_id: int):
     try:
         for step_num, step_name, step_fn in steps:
             await step_fn(translation_id, db)
+    except WorkflowCancelled:
+        try:
+            translation = db.query(LiteraryTranslation).filter(
+                LiteraryTranslation.id == translation_id
+            ).first()
+            if translation:
+                translation.status = LiteraryTranslationStatus.FAILED
+                if not translation.error_message:
+                    translation.error_message = "Cancelled by user"
+                db.commit()
+        except Exception:
+            pass
     except Exception as e:
         # 确定失败步骤（当前步骤尚未完成）
         failed_step = 1
@@ -671,6 +712,29 @@ async def start_translation_workflow(
 
     return {"message": "翻译流程已启动", "status": "translating"}
 
+@router.post("/translations/{translation_id}/workflow/stop")
+async def stop_translation_workflow(
+    translation_id: int,
+    db: Session = Depends(get_db)
+):
+    translation = db.query(LiteraryTranslation).filter(
+        LiteraryTranslation.id == translation_id
+    ).first()
+    if not translation:
+        raise HTTPException(status_code=404, detail="Translation not found")
+    running_statuses = {
+        LiteraryTranslationStatus.TRANSLATING,
+        LiteraryTranslationStatus.VERIFYING,
+        LiteraryTranslationStatus.REVISING,
+        LiteraryTranslationStatus.FINALIZING,
+    }
+    if translation.status not in running_statuses:
+        return {"message": "当前未在运行", "status": translation.status}
+    CANCELLED_TRANSLATIONS.add(translation_id)
+    translation.status = LiteraryTranslationStatus.FAILED
+    translation.error_message = "Cancelled by user"
+    db.commit()
+    return {"message": "已终止", "status": "failed"}
 
 async def _run_batch_workflow_background(translation_ids: list):
     """依次执行多个任务的翻译流程，前一个完成后才开始下一个"""

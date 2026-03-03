@@ -186,6 +186,15 @@
               {{ nextStepLabel }}
               <el-icon class="el-icon--right"><ArrowRight /></el-icon>
             </el-button>
+            <el-button
+              v-if="isWorkflowRunning"
+              type="danger"
+              size="default"
+              :loading="isProcessing"
+              @click="stopComponentWorkflow"
+            >
+              终止流程
+            </el-button>
             <el-button-group v-if="isCompleted">
               <el-button type="success" size="default" @click="showExport = true">
                 <el-icon><Download /></el-icon>
@@ -627,13 +636,33 @@ const startComponentPolling = () => {
     } catch (error) {
       console.error('Polling error:', error)
     }
-  }, 3000)
+  }, 12000)
 }
 
 const stopComponentPolling = () => {
   if (componentPollTimer) {
     clearInterval(componentPollTimer)
     componentPollTimer = null
+  }
+}
+
+const isWorkflowRunning = computed(() =>
+  ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
+)
+
+const stopComponentWorkflow = async () => {
+  if (!currentTask.value) return
+  isProcessing.value = true
+  try {
+    await literaryApi.stopWorkflow(currentTask.value.id)
+    stopComponentPolling()
+    await refreshTask()
+    isTranslating.value = false
+    isProcessing.value = false
+    ElMessage.success('已终止')
+  } catch (error) {
+    ElMessage.error('中止失败')
+    isProcessing.value = false
   }
 }
 

@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { ElLoading } from 'element-plus'
 
 const api = axios.create({
   baseURL: '/api',
@@ -7,6 +8,51 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+let globalLoading: any = null
+let globalLoadingRefCount = 0
+const shouldShowGlobalLoading = (config: any) => {
+  const url = config?.url || ''
+  const method = (config?.method || 'get').toLowerCase()
+  const params = config?.params || {}
+  return method === 'get' &&
+    typeof url === 'string' &&
+    url.startsWith('/literary/translations/') &&
+    params?.include_paragraphs
+}
+api.interceptors.request.use((config) => {
+  if (shouldShowGlobalLoading(config)) {
+    if (globalLoadingRefCount === 0) {
+      globalLoading = ElLoading.service({ fullscreen: true, text: '加载任务中...' })
+    }
+    globalLoadingRefCount += 1
+  }
+  return config
+})
+api.interceptors.response.use(
+  (response) => {
+    if (shouldShowGlobalLoading(response.config)) {
+      globalLoadingRefCount = Math.max(0, globalLoadingRefCount - 1)
+      if (globalLoadingRefCount === 0 && globalLoading) {
+        globalLoading.close()
+        globalLoading = null
+      }
+    }
+    return response
+  },
+  (error) => {
+    try {
+      if (shouldShowGlobalLoading(error?.config)) {
+        globalLoadingRefCount = Math.max(0, globalLoadingRefCount - 1)
+        if (globalLoadingRefCount === 0 && globalLoading) {
+          globalLoading.close()
+          globalLoading = null
+        }
+      }
+    } catch {}
+    return Promise.reject(error)
+  }
+)
 
 // 翻译 API
 export const translateApi = {
@@ -145,6 +191,9 @@ export const literaryApi = {
 
   // 启动四步翻译流程（后台执行，立即返回）
   startWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/start`),
+
+  // 终止四步翻译流程
+  stopWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/stop`),
 
   // 批量启动翻译流程（按顺序依次处理）
   startBatchWorkflow: (ids: number[]) => api.post('/literary/translations/batch/workflow/start', { translation_ids: ids }),

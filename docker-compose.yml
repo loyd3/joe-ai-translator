@@ -1,0 +1,111 @@
+# ============================================
+# AI Translator - Docker Compose (独立端口)
+#
+# 端口分配（与 joe-ai-writer 区分）:
+#   - 前端: 8081 (writer 用 8080)
+#   - 后端: 8002 (writer 用 8001)
+#   - 数据库: 3308 (writer 用 3307)
+#
+# 本地开发端口:
+#   - 前端: 5173
+#   - 后端: 8000
+#   - 数据库: 3306
+#
+# 使用方法:
+#   docker-compose up -d
+# ============================================
+
+version: '3.8'
+
+services:
+  # MySQL 数据库 (Docker 内部)
+  mysql:
+    image: mysql:8.0
+    container_name: ai-translator-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-aitranslator}
+      MYSQL_USER: ${MYSQL_USER:-aitranslator}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-aitranslator123}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_translator_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      # 映射到 3308，避免与本地 3306 和 writer 3307 冲突
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    networks:
+      - ai-translator-network
+
+  # 后端服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-translator-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 连接 Docker 内部的 MySQL
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-aitranslator}:${MYSQL_PASSWORD:-aitranslator123}@mysql:3306/${MYSQL_DATABASE:-aitranslator}?charset=utf8mb4
+      # AI 配置从 .env 读取
+      AI_PROVIDER: ${AI_PROVIDER:-deepseek}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0.3}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-4096}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
+      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL:-deepseek-ai/DeepSeek-V3}
+      CUSTOM_API_KEY: ${CUSTOM_API_KEY}
+      CUSTOM_BASE_URL: ${CUSTOM_BASE_URL}
+      CUSTOM_MODEL: ${CUSTOM_MODEL}
+      # 应用配置
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      DEBUG: "false"
+      TZ: Asia/Shanghai
+      # CORS 允许前端 8081 端口访问
+      ALLOWED_ORIGINS: "http://localhost:8081,http://127.0.0.1:8081,http://localhost:5173,http://127.0.0.1:5173"
+    ports:
+      # 映射到 8002，避免与本地 8000 和 writer 8001 冲突
+      - "8002:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - ai-translator-network
+
+  # 前端服务
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-translator-frontend
+    restart: unless-stopped
+    environment:
+      # 指向 Docker 后端端口 8002
+      - VITE_API_URL=http://localhost:8002
+    ports:
+      # 映射到 8081，避免与本地 5173 和 writer 8080 冲突
+      - "8081:5173"
+    depends_on:
+      - backend
+    networks:
+      - ai-translator-network
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  mysql_translator_data:
+    driver: local
+
+networks:
+  ai-translator-network:
+    driver: bridge

@@ -21,7 +21,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://ai-translator-backend:8000',  // Docker 后端服务名
         changeOrigin: true,
       },
     },

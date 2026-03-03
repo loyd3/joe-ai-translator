@@ -45,8 +45,12 @@ app = FastAPI(
 _default_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:8081",   # Docker 前端端口
+    "http://127.0.0.1:8081",   # Docker 前端端口
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "http://localhost:8002",   # Docker 后端端口
+    "http://127.0.0.1:8002",   # Docker 后端端口
 ]
 _env_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 allowed_origins = _env_origins if _env_origins else _default_origins

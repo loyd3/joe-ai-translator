@@ -2,11 +2,24 @@
 数据模型定义
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey, Enum
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey, Enum, UniqueConstraint
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
 import enum
+
+
+class User(Base):
+    """用户表"""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    display_name = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
 class TranslationHistory(Base):
@@ -14,6 +27,7 @@ class TranslationHistory(Base):
     __tablename__ = "translation_history"
     
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     source_text = Column(Text, nullable=False)
     translated_text = Column(Text, nullable=False)
     source_lang = Column(String(10), default="auto")
@@ -31,6 +45,7 @@ class BatchTranslation(Base):
     __tablename__ = "batch_translations"
     
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     name = Column(String(255), nullable=True)
     source_lang = Column(String(10), default="auto")
     target_lang = Column(String(10), nullable=False)
@@ -62,6 +77,7 @@ class LiteraryTranslation(Base):
     __tablename__ = "literary_translations"
     
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     title = Column(String(500), nullable=True, comment="文本标题")
     source_text = Column(Text, nullable=False, comment="原文")
     
@@ -146,6 +162,7 @@ class ReferenceDocument(Base):
     __tablename__ = "reference_documents"
     
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     name = Column(String(255), nullable=False, comment="文档名称")
     file_type = Column(String(50), nullable=False, comment="文件类型: txt, md, docx, pdf")
     file_size = Column(Integer, nullable=False, comment="文件大小（字节）")
@@ -241,10 +258,11 @@ class TranslationTermSummary(Base):
 
 
 class AIConfig(Base):
-    """大模型配置（单行表，id 固定为 1）"""
+    """大模型配置（按用户，每用户一行）"""
     __tablename__ = "ai_config"
 
-    id = Column(Integer, primary_key=True, default=1)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=True, index=True, comment="用户ID，NULL 表示全局默认")
     provider = Column(String(50), nullable=False, default="deepseek", comment="AI 提供商: openai, deepseek, siliconflow, custom")
     api_key = Column(String(500), nullable=True, comment="API Key")
     model = Column(String(200), nullable=True, comment="模型名称")

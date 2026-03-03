@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import OperationalError
 
-from app.api import translate, system, literary_translation
+from app.api import translate, system, literary_translation, auth
 from app.database import engine, Base
 import os
 
@@ -64,6 +64,7 @@ app.add_middleware(
 )
 
 # 注册路由
+app.include_router(auth.router)
 app.include_router(translate.router)
 app.include_router(system.router)
 app.include_router(literary_translation.router)

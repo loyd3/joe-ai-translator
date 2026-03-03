@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     debug: bool = False
     secret_key: str = "your-secret-key-change-in-production"
     allowed_origins: str = "http://localhost:5173,http://localhost:3000"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60 * 24 * 7  # 7 天
 
     ai_provider: str = "deepseek"
     ai_temperature: float = 0.3
@@ -154,19 +156,21 @@ class AIClient:
         "siliconflow": "deepseek-ai/DeepSeek-V3",
     }
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Optional[Settings] = None, user_id: Optional[int] = None):
         self.settings = settings or get_settings()
+        self.user_id = user_id
         self._client = None
         self._init_client()
 
     def _load_db_config(self):
-        """尝试从数据库加载配置，返回配置 dict 或 None"""
+        """尝试从数据库加载配置（按 user_id），返回配置 dict 或 None"""
         try:
             from app.database import SessionLocal
             from app.models.models import AIConfig
             db = SessionLocal()
             try:
-                cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
+                q = db.query(AIConfig).filter(AIConfig.user_id == self.user_id)
+                cfg = q.first()
                 if cfg and cfg.api_key:
                     return {
                         "provider": cfg.provider,
@@ -231,8 +235,10 @@ class AIClient:
         self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
         _safe_print(f"[AIClient] Initialized from .env: provider={provider}, model={self.model}")
 
-    def reload_from_db(self):
+    def reload_from_db(self, user_id: Optional[int] = None):
         """重新从数据库加载配置并重新初始化客户端"""
+        if user_id is not None:
+            self.user_id = user_id
         self._client = None
         self._init_client()
 
@@ -1009,27 +1015,21 @@ Output only the translated text, no additional comments."""
             }
 
 
-# 全局客户端实例（延迟初始化）
-_ai_client_instance: Optional[AIClient] = None
+# 按 user_id 获取客户端（不缓存，每次请求新建，以便使用该用户的 AI 配置）
+def get_ai_client(user_id: Optional[int] = None) -> AIClient:
+    """获取 AI 客户端。传入 user_id 时使用该用户在数据库中的 AI 配置；否则使用 .env 默认。"""
+    return AIClient(user_id=user_id)
 
 
-def get_ai_client() -> AIClient:
-    """获取 AI 客户端实例（延迟初始化）"""
-    global _ai_client_instance
-    if _ai_client_instance is None:
-        _ai_client_instance = AIClient()
-    return _ai_client_instance
-
-
-# 向后兼容 - 使用属性访问器实现真正的延迟加载
+# 向后兼容：无 user_id 时使用 .env 的延迟代理
 class _LazyAIClient:
-    """延迟加载的 AI 客户端代理"""
+    """延迟加载的 AI 客户端代理（无用户时使用 .env 配置）"""
 
     _client: Optional[AIClient] = None
 
     def _get_client(self):
         if self._client is None:
-            self._client = get_ai_client()
+            self._client = AIClient(user_id=None)
         return self._client
 
     def __getattr__(self, name):

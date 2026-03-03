@@ -1,5 +1,5 @@
 """
-系统配置 API
+系统配置 API（与用户绑定，需 token）
 """
 
 from fastapi import APIRouter, Depends
@@ -7,8 +7,9 @@ from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.core.ai_client import get_settings, get_ai_client
+from app.core.auth import get_current_user
 from app.database import get_db
-from app.models.models import AIConfig
+from app.models.models import AIConfig, User
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -22,9 +23,12 @@ PROVIDER_DEFAULTS = {
 
 
 @router.get("/config")
-async def get_config(db: Session = Depends(get_db)):
-    """获取系统配置（安全信息已脱敏）"""
-    db_cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
+async def get_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取系统配置（安全信息已脱敏，按当前用户）"""
+    db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
     settings = get_settings()
     if db_cfg and db_cfg.api_key:
         provider = db_cfg.provider
@@ -60,9 +64,12 @@ class AIConfigUpdate(BaseModel):
 
 
 @router.get("/ai-config")
-async def get_ai_config(db: Session = Depends(get_db)):
-    """获取大模型配置（API Key 脱敏）"""
-    db_cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
+async def get_ai_config(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取大模型配置（API Key 脱敏，按当前用户）"""
+    db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
     settings = get_settings()
     if db_cfg:
         masked_key = ""
@@ -97,11 +104,15 @@ async def get_ai_config(db: Session = Depends(get_db)):
 
 
 @router.put("/ai-config")
-async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db)):
-    """更新大模型配置"""
-    db_cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
+async def update_ai_config(
+    request: AIConfigUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """更新大模型配置（按当前用户）"""
+    db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
     if not db_cfg:
-        db_cfg = AIConfig(id=1)
+        db_cfg = AIConfig(user_id=current_user.id)
         db.add(db_cfg)
 
     db_cfg.provider = request.provider
@@ -120,8 +131,8 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
     db.refresh(db_cfg)
 
     try:
-        client = get_ai_client()
-        client.reload_from_db()
+        client = get_ai_client(current_user.id)
+        client.reload_from_db(current_user.id)
     except Exception:
         pass
 

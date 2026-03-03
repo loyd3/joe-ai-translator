@@ -2,10 +2,61 @@
 Pydantic 数据模型
 """
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, EmailStr
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
+
+
+# ============================================================
+# 用户与认证 Schemas
+# ============================================================
+
+class UserCreate(BaseModel):
+    """用户注册"""
+    email: EmailStr
+    password: str = Field(..., min_length=6, max_length=100)
+    display_name: Optional[str] = Field(default=None, max_length=100)
+
+
+class UserLogin(BaseModel):
+    """用户登录"""
+    email: EmailStr
+    password: str
+
+
+class UserUpdate(BaseModel):
+    """用户信息更新"""
+    display_name: Optional[str] = Field(default=None, max_length=100)
+    password: Optional[str] = Field(default=None, min_length=6, max_length=100)
+
+
+class UserResponse(BaseModel):
+    """用户信息响应（不含密码）"""
+    id: int
+    email: str
+    display_name: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+
+    @field_serializer('created_at')
+    def serialize_created_at(self, dt: Optional[datetime], _info):
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, 'isoformat') else str(dt)
+
+    class Config:
+        from_attributes = True
+
+
+class TokenResponse(BaseModel):
+    """登录/注册返回的 token"""
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
 
 
 class TranslationRequest(BaseModel):

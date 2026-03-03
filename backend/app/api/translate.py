@@ -7,11 +7,12 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.database import get_db
+from app.core.auth import get_current_user
 from app.schemas.schemas import (
     TranslationRequest, TranslationResponse, TranslationHistoryItem,
     BatchTranslationRequest, BatchTranslationResponse, LanguageInfo
 )
-from app.models.models import TranslationHistory, BatchTranslation
+from app.models.models import TranslationHistory, BatchTranslation, User
 from app.core.ai_client import get_ai_client, AIClient
 from langdetect import detect
 import json
@@ -35,8 +36,8 @@ def detect_language(text: str) -> str:
 
 
 @router.get("/languages", response_model=List[LanguageInfo])
-async def get_languages():
-    """获取支持的语言列表（不依赖 API 配置）"""
+async def get_languages(current_user: User = Depends(get_current_user)):
+    """获取支持的语言列表（需 token）"""
     return [
         LanguageInfo(code=code, name=name)
         for code, name in AIClient.SUPPORTED_LANGUAGES.items()
@@ -46,11 +47,12 @@ async def get_languages():
 @router.post("/", response_model=TranslationResponse)
 async def translate_text(
     request: TranslationRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """翻译文本（非流式）"""
+    """翻译文本（非流式，需 token）"""
     try:
-        client = get_ai_client()
+        client = get_ai_client(current_user.id)
         
         # 检测源语言
         detected_lang = None
@@ -69,6 +71,7 @@ async def translate_text(
         
         # 保存到历史记录
         history = TranslationHistory(
+            user_id=current_user.id,
             source_text=request.text,
             translated_text=translated,
             source_lang=request.source_lang,
@@ -93,11 +96,12 @@ async def translate_text(
 @router.post("/stream")
 async def translate_stream(
     request: TranslationRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """翻译文本（流式）"""
+    """翻译文本（流式，需 token）"""
     try:
-        client = get_ai_client()
+        client = get_ai_client(current_user.id)
         
         # 检测源语言
         source_lang = request.source_lang
@@ -119,6 +123,7 @@ async def translate_stream(
             # 保存完整翻译到历史
             full_text = "".join(translated_parts)
             history = TranslationHistory(
+                user_id=current_user.id,
                 source_text=request.text,
                 translated_text=full_text,
                 source_lang=request.source_lang,
@@ -141,10 +146,11 @@ async def get_history(
     skip: int = 0,
     limit: int = 50,
     favorite_only: bool = False,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """获取翻译历史"""
-    query = db.query(TranslationHistory)
+    """获取翻译历史（需 token，仅当前用户）"""
+    query = db.query(TranslationHistory).filter(TranslationHistory.user_id == current_user.id)
     if favorite_only:
         query = query.filter(TranslationHistory.is_favorite == True)
     query = query.order_by(TranslationHistory.created_at.desc())
@@ -155,10 +161,14 @@ async def get_history(
 @router.post("/history/{history_id}/favorite")
 async def toggle_favorite(
     history_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """切换收藏状态"""
-    item = db.query(TranslationHistory).filter(TranslationHistory.id == history_id).first()
+    """切换收藏状态（需 token）"""
+    item = db.query(TranslationHistory).filter(
+        TranslationHistory.id == history_id,
+        TranslationHistory.user_id == current_user.id,
+    ).first()
     if not item:
         raise HTTPException(status_code=404, detail="Translation not found")
     
@@ -170,10 +180,14 @@ async def toggle_favorite(
 @router.delete("/history/{history_id}")
 async def delete_history(
     history_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """删除历史记录"""
-    item = db.query(TranslationHistory).filter(TranslationHistory.id == history_id).first()
+    """删除历史记录（需 token）"""
+    item = db.query(TranslationHistory).filter(
+        TranslationHistory.id == history_id,
+        TranslationHistory.user_id == current_user.id,
+    ).first()
     if not item:
         raise HTTPException(status_code=404, detail="Translation not found")
     
@@ -185,10 +199,12 @@ async def delete_history(
 @router.post("/batch", response_model=BatchTranslationResponse)
 async def create_batch_translation(
     request: BatchTranslationRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """创建批量翻译任务"""
+    """创建批量翻译任务（需 token）"""
     batch = BatchTranslation(
+        user_id=current_user.id,
         source_lang=request.source_lang,
         target_lang=request.target_lang,
         items=[
@@ -208,10 +224,14 @@ async def create_batch_translation(
 @router.get("/batch/{batch_id}", response_model=BatchTranslationResponse)
 async def get_batch_translation(
     batch_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """获取批量翻译任务状态"""
-    batch = db.query(BatchTranslation).filter(BatchTranslation.id == batch_id).first()
+    """获取批量翻译任务状态（需 token）"""
+    batch = db.query(BatchTranslation).filter(
+        BatchTranslation.id == batch_id,
+        BatchTranslation.user_id == current_user.id,
+    ).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch translation not found")
     return batch

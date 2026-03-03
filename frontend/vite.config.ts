@@ -21,7 +21,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://ai-translator-backend:8000',  // Docker 后端服务名
+        // 本地开发用 localhost；Docker 时可通过 VITE_API_PROXY_TARGET=http://ai-translator-backend:8000 覆盖
+        target: process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
     },

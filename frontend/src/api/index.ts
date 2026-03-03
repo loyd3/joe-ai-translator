@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { ElLoading } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
 
 const api = axios.create({
   baseURL: '/api',
@@ -8,6 +9,31 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+// 请求时附带 token
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('ai_translator_token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// 401 时清除登录并跳转登录页（仅浏览器环境）
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err.response?.status === 401 && typeof window !== 'undefined') {
+      const auth = useAuthStore()
+      auth.logout()
+      const path = window.location.pathname
+      if (!path.startsWith('/login') && !path.startsWith('/register')) {
+        window.location.href = '/login?redirect=' + encodeURIComponent(path)
+      }
+    }
+    return Promise.reject(err)
+  }
+)
 
 let globalLoading: any = null
 let globalLoadingRefCount = 0
@@ -68,17 +94,22 @@ export const translateApi = {
     stream?: boolean
   }) => api.post('/translate/', data),
   
-  // 流式翻译
+  // 流式翻译（需 token，手动附带 Authorization）
   translateStream: (data: {
     text: string
     source_lang: string
     target_lang: string
     context?: string
-  }) => fetch('/api/translate/stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  }),
+  }) => {
+    const token = localStorage.getItem('ai_translator_token')
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers.Authorization = `Bearer ${token}`
+    return fetch('/api/translate/stream', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(data),
+    })
+  },
   
   // 获取翻译历史
   getHistory: (params?: { skip?: number; limit?: number; favorite_only?: boolean }) => 
@@ -100,6 +131,17 @@ export const translateApi = {
   
   // 获取批量翻译任务
   getBatch: (id: number) => api.get(`/translate/batch/${id}`),
+}
+
+// 认证 API
+export const authApi = {
+  login: (data: { email: string; password: string }) =>
+    api.post<{ access_token: string; user: import('@/stores/auth').UserInfo }>('/auth/login', data),
+  register: (data: { email: string; password: string; display_name?: string }) =>
+    api.post<{ access_token: string; user: import('@/stores/auth').UserInfo }>('/auth/register', data),
+  getMe: () => api.get<import('@/stores/auth').UserInfo>('/auth/me'),
+  updateMe: (data: { display_name?: string; password?: string }) =>
+    api.put<import('@/stores/auth').UserInfo>('/auth/me', data),
 }
 
 // 系统 API

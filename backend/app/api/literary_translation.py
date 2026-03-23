@@ -16,7 +16,7 @@ import tempfile
 import shutil
 import traceback
 from app.database import get_db, SessionLocal
-from app.core.auth import get_current_user
+from app.core.auth import get_optional_user
 from app.models.models import User
 from app.schemas.schemas import (
     LiteraryTranslationCreate, LiteraryTranslationResponse,
@@ -36,6 +36,12 @@ from app.models.models import (
 )
 from app.core.ai_client import get_ai_client
 
+
+def _uid(user: Optional[User]) -> Optional[int]:
+    """已登录返回用户 ID；匿名返回 None（共享数据与全局 AI 配置）"""
+    return user.id if user else None
+
+
 router = APIRouter(prefix="/api/literary", tags=["literary-translation"])
 
 class WorkflowCancelled(Exception):
@@ -51,11 +57,11 @@ CANCELLED_TRANSLATIONS: set[int] = set()
 async def create_reference_document(
     request: ReferenceDocumentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """创建参考文档（需 token）"""
     doc = ReferenceDocument(
-        user_id=current_user.id,
+        user_id=_uid(current_user),
         name=request.name,
         file_type="txt",
         file_size=len(request.content.encode('utf-8')),
@@ -77,10 +83,10 @@ async def list_reference_documents(
     doc_type: Optional[str] = None,
     is_active: Optional[bool] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取参考文档列表（需 token）"""
-    query = db.query(ReferenceDocument).filter(ReferenceDocument.user_id == current_user.id)
+    query = db.query(ReferenceDocument).filter(ReferenceDocument.user_id == _uid(current_user))
     if doc_type:
         query = query.filter(ReferenceDocument.doc_type == doc_type)
     if is_active is not None:
@@ -93,12 +99,12 @@ async def list_reference_documents(
 async def get_reference_document(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取参考文档详情（需 token）"""
     doc = db.query(ReferenceDocument).filter(
         ReferenceDocument.id == doc_id,
-        ReferenceDocument.user_id == current_user.id,
+        ReferenceDocument.user_id == _uid(current_user),
     ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Reference document not found")
@@ -110,12 +116,12 @@ async def update_reference_document(
     doc_id: int,
     request: ReferenceDocumentUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """更新参考文档（需 token）"""
     doc = db.query(ReferenceDocument).filter(
         ReferenceDocument.id == doc_id,
-        ReferenceDocument.user_id == current_user.id,
+        ReferenceDocument.user_id == _uid(current_user),
     ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Reference document not found")
@@ -141,12 +147,12 @@ async def update_reference_document(
 async def delete_reference_document(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """删除参考文档（需 token）"""
     doc = db.query(ReferenceDocument).filter(
         ReferenceDocument.id == doc_id,
-        ReferenceDocument.user_id == current_user.id,
+        ReferenceDocument.user_id == _uid(current_user),
     ).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Reference document not found")
@@ -164,7 +170,7 @@ async def upload_reference_document(
     target_lang: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """上传参考文档文件（需 token）"""
     content = await file.read()
@@ -176,7 +182,7 @@ async def upload_reference_document(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     doc = ReferenceDocument(
-        user_id=current_user.id,
+        user_id=_uid(current_user),
         name=file.filename,
         file_type=file.filename.split('.')[-1] if '.' in file.filename else 'txt',
         file_size=len(content),
@@ -286,11 +292,11 @@ def get_reference_and_requirements(translation: LiteraryTranslation, db: Session
 async def create_literary_translation(
     request: LiteraryTranslationCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """创建文学翻译任务（需 token）"""
     translation = LiteraryTranslation(
-        user_id=current_user.id,
+        user_id=_uid(current_user),
         title=request.title,
         source_text=request.source_text,
         source_lang=request.source_lang,
@@ -326,11 +332,11 @@ async def list_literary_translations(
     limit: int = 50,
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取文学翻译任务列表（需 token）"""
     try:
-        query = db.query(LiteraryTranslation).filter(LiteraryTranslation.user_id == current_user.id)
+        query = db.query(LiteraryTranslation).filter(LiteraryTranslation.user_id == _uid(current_user))
         if status:
             query = query.filter(LiteraryTranslation.status == status)
         query = query.order_by(LiteraryTranslation.created_at.desc())
@@ -385,7 +391,7 @@ async def _run_batch_workflow_background(translation_ids: list, user_id: int):
 async def start_batch_workflow(
     request: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """批量启动翻译流程（需 token）"""
     translation_ids = request.get("translation_ids", [])
@@ -403,7 +409,7 @@ async def start_batch_workflow(
     for tid in translation_ids:
         t = db.query(LiteraryTranslation).filter(
             LiteraryTranslation.id == tid,
-            LiteraryTranslation.user_id == current_user.id,
+            LiteraryTranslation.user_id == _uid(current_user),
         ).first()
         if not t:
             continue
@@ -416,7 +422,7 @@ async def start_batch_workflow(
         raise HTTPException(status_code=400, detail="没有可启动的任务")
 
     db.commit()
-    asyncio.create_task(_run_batch_workflow_background(valid_ids, current_user.id))
+    asyncio.create_task(_run_batch_workflow_background(valid_ids, _uid(current_user)))
 
     return {"message": f"已加入队列 {len(valid_ids)} 个任务", "translation_ids": valid_ids}
 
@@ -426,12 +432,12 @@ async def get_literary_translation(
     translation_id: int,
     include_paragraphs: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取文学翻译任务详情（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     
     if not translation:
@@ -445,12 +451,12 @@ async def update_literary_translation(
     translation_id: int,
     request: LiteraryTranslationUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """更新文学翻译任务（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     
     if not translation:
@@ -477,12 +483,12 @@ async def update_literary_translation(
 async def delete_literary_translation(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """删除文学翻译任务（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     
     if not translation:
@@ -783,12 +789,12 @@ async def _run_workflow_background(translation_id: int, user_id: int):
 async def start_translation_workflow(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """启动四步翻译流程（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
@@ -816,7 +822,7 @@ async def start_translation_workflow(
     translation.error_message = None  # 新流程开始时清空旧错误
     db.commit()
 
-    asyncio.create_task(_run_workflow_background(translation_id, current_user.id))
+    asyncio.create_task(_run_workflow_background(translation_id, _uid(current_user)))
 
     return {"message": "翻译流程已启动", "status": "translating"}
 
@@ -824,11 +830,11 @@ async def start_translation_workflow(
 async def stop_translation_workflow(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
@@ -851,12 +857,12 @@ async def stop_translation_workflow(
 async def get_workflow_status(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取工作流状态（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
 
     if not translation:
@@ -917,12 +923,12 @@ async def get_workflow_status(
 async def get_paragraphs(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取所有段落（需 token）"""
     t = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Translation not found")
@@ -938,7 +944,7 @@ async def update_paragraph(
     paragraph_id: int,
     request: ParagraphUpdateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """更新段落译文（需 token）"""
     paragraph = db.query(LiteraryParagraph).filter(
@@ -949,7 +955,7 @@ async def update_paragraph(
         raise HTTPException(status_code=404, detail="Paragraph not found")
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == paragraph.translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
@@ -1214,12 +1220,12 @@ async def export_translation(
     translation_id: int,
     request: ExportTranslationRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """导出翻译结果（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     
     if not translation:
@@ -1283,7 +1289,7 @@ async def list_professional_terms(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取专业词汇列表（需 token）"""
     query = db.query(ProfessionalTerm)
@@ -1312,7 +1318,7 @@ async def list_professional_terms(
 async def create_professional_term(
     request: ProfessionalTermCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """创建专业词汇（需 token）"""
     # 检查是否已存在相同词汇
@@ -1356,7 +1362,7 @@ async def update_professional_term(
     term_id: int,
     request: ProfessionalTermUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """更新专业词汇（需 token）"""
     term = db.query(ProfessionalTerm).filter(ProfessionalTerm.id == term_id).first()
@@ -1381,7 +1387,7 @@ async def update_professional_term(
 async def delete_professional_term(
     term_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """删除专业词汇（需 token）"""
     term = db.query(ProfessionalTerm).filter(ProfessionalTerm.id == term_id).first()
@@ -1397,7 +1403,7 @@ async def delete_professional_term(
 async def get_term_categories(
     literary_type: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取词汇分类列表（需 token）"""
     query = db.query(ProfessionalTerm.category).distinct()
@@ -1416,12 +1422,12 @@ async def get_term_categories(
 async def get_translation_term_summary(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取翻译任务的专业词汇总结（需 token）"""
     t = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Translation not found")
@@ -1439,12 +1445,12 @@ async def get_translation_term_summary(
 async def extract_terms_from_translation(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """从翻译任务中提取专业词汇（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
 
     if not translation:
@@ -1463,7 +1469,7 @@ async def extract_terms_from_translation(
     ]
 
     # 使用 AI 提取词汇
-    client = get_ai_client(current_user.id)
+    client = get_ai_client(_uid(current_user))
     result = await client.extract_professional_terms(
         source_text=translation.source_text,
         translated_text=translation.final_translation or translation.step4_finalization or "",
@@ -1760,7 +1766,7 @@ MAX_UPLOAD_SIZE = 20 * 1024 * 1024
 @router.post("/parse-file")
 async def parse_uploaded_file(
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """解析上传文件并返回提取的正文（需 token）"""
     ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
@@ -1791,7 +1797,7 @@ async def upload_and_translate_file(
     user_requirements: Optional[str] = Form(None),
     auto_run: bool = Form(True, description="是否自动执行四步流程"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """上传文件并创建翻译任务（需 token）"""
     file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
@@ -1810,7 +1816,7 @@ async def upload_and_translate_file(
         raise HTTPException(status_code=400, detail="文件内容为空")
     ref_ids = json.loads(reference_document_ids) if reference_document_ids else []
     translation = LiteraryTranslation(
-        user_id=current_user.id,
+        user_id=_uid(current_user),
         title=title or file.filename,
         source_text=text_content,
         source_lang=source_lang,
@@ -1835,10 +1841,10 @@ async def upload_and_translate_file(
     db.commit()
     if auto_run:
         try:
-            await _execute_step1(translation.id, db, current_user.id)
-            await _execute_step2(translation.id, db, current_user.id)
-            await _execute_step3(translation.id, db, current_user.id)
-            await _execute_step4(translation.id, db, current_user.id)
+            await _execute_step1(translation.id, db, _uid(current_user))
+            await _execute_step2(translation.id, db, _uid(current_user))
+            await _execute_step3(translation.id, db, _uid(current_user))
+            await _execute_step4(translation.id, db, _uid(current_user))
             db.refresh(translation)
         except HTTPException:
             raise
@@ -1860,12 +1866,12 @@ async def translate_all_chunks(
     translation_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """一键翻译所有段落（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     
     if not translation:
@@ -1882,7 +1888,7 @@ async def translate_all_chunks(
     translation.status = LiteraryTranslationStatus.TRANSLATING
     db.commit()
     
-    client = get_ai_client(current_user.id)
+    client = get_ai_client(_uid(current_user))
     
     # 获取参考文档内容
     reference_content = ""
@@ -1890,7 +1896,7 @@ async def translate_all_chunks(
         docs = db.query(ReferenceDocument).filter(
             ReferenceDocument.id.in_(translation.reference_document_ids),
             ReferenceDocument.is_active == True,
-            ReferenceDocument.user_id == current_user.id,
+            ReferenceDocument.user_id == _uid(current_user),
         ).all()
         reference_content = "\n\n".join([f"=== {d.name} ===\n{d.content}" for d in docs])
     
@@ -1959,7 +1965,7 @@ async def translate_all_chunks(
     db.commit()
     
     # 后台自动提取专业词汇
-    background_tasks.add_task(auto_extract_terms_after_finalize, translation_id, db, current_user.id)
+    background_tasks.add_task(auto_extract_terms_after_finalize, translation_id, db, _uid(current_user))
     
     return {
         "message": "一键翻译完成",
@@ -1978,12 +1984,12 @@ async def translate_all_chunks(
 async def get_translation_progress(
     translation_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     """获取长文本翻译进度（需 token）"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id,
-        LiteraryTranslation.user_id == current_user.id,
+        LiteraryTranslation.user_id == _uid(current_user),
     ).first()
     
     if not translation:

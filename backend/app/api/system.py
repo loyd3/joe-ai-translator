@@ -1,5 +1,5 @@
 """
-系统配置 API（与用户绑定，需 token）
+系统配置 API（可选登录：匿名使用 user_id=NULL 的全局配置）
 """
 
 import logging
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 
 from app.core.ai_client import get_settings, get_ai_client
-from app.core.auth import get_current_user
+from app.core.auth import get_optional_user
 from app.database import get_db
 from app.models.models import AIConfig, User
 
@@ -30,11 +30,12 @@ PROVIDER_DEFAULTS = {
 @router.get("/config")
 async def get_config(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
-    """获取系统配置（安全信息已脱敏，按当前用户）"""
+    """获取系统配置（安全信息已脱敏；匿名使用全局 user_id=NULL 配置）"""
+    uid = current_user.id if current_user else None
     try:
-        db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
+        db_cfg = db.query(AIConfig).filter(AIConfig.user_id == uid).first()
     except OperationalError as e:
         logger.exception("ai_config table query failed: %s", e)
         err_msg = str(getattr(e, "orig", e))
@@ -92,11 +93,12 @@ def _env_model_value(settings) -> str:
 @router.get("/ai-config")
 async def get_ai_config(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
-    """获取大模型配置（API Key 脱敏，按当前用户）"""
+    """获取大模型配置（API Key 脱敏；匿名使用全局配置）"""
+    uid = current_user.id if current_user else None
     try:
-        db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
+        db_cfg = db.query(AIConfig).filter(AIConfig.user_id == uid).first()
     except OperationalError as e:
         logger.exception("ai_config table query failed: %s", e)
         err_msg = str(getattr(e, "orig", e))
@@ -140,12 +142,13 @@ async def get_ai_config(
 async def update_ai_config(
     request: AIConfigUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
-    """更新大模型配置（按当前用户）"""
-    db_cfg = db.query(AIConfig).filter(AIConfig.user_id == current_user.id).first()
+    """更新大模型配置（匿名写入 user_id=NULL 的全局配置）"""
+    uid = current_user.id if current_user else None
+    db_cfg = db.query(AIConfig).filter(AIConfig.user_id == uid).first()
     if not db_cfg:
-        db_cfg = AIConfig(user_id=current_user.id)
+        db_cfg = AIConfig(user_id=uid)
         db.add(db_cfg)
 
     db_cfg.provider = request.provider
@@ -164,8 +167,8 @@ async def update_ai_config(
     db.refresh(db_cfg)
 
     try:
-        client = get_ai_client(current_user.id)
-        client.reload_from_db(current_user.id)
+        client = get_ai_client(uid)
+        client.reload_from_db(uid)
     except Exception:
         pass
 

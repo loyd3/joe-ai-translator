@@ -77,3 +77,27 @@ def get_current_user(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户已禁用")
     return user
+
+
+def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    """
+    可选登录：无 token 或 token 无效时返回 None，不抛 401。
+    匿名访问时业务层使用 user_id=None（共享匿名数据与全局 AI 配置）。
+    """
+    if not credentials:
+        return None
+    token = credentials.credentials
+    payload = decode_token(token)
+    if not payload or "sub" not in payload:
+        return None
+    try:
+        user_id = int(payload["sub"])
+    except (ValueError, TypeError):
+        return None
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
+        return None
+    return user

@@ -65,27 +65,6 @@
         <el-empty v-if="filteredTaskList.length === 0" description="暂无任务" :image-size="60" />
       </div>
 
-      <div class="sidebar-user" v-if="auth.user">
-        <el-dropdown trigger="click" @command="handleUserCommand">
-          <span class="user-trigger">
-            <el-icon><User /></el-icon>
-            <span>{{ auth.user?.display_name || auth.user?.email }}</span>
-            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-          </span>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="profile">
-                <el-icon><User /></el-icon>
-                个人资料
-              </el-dropdown-item>
-              <el-dropdown-item command="logout" divided>
-                <el-icon><SwitchButton /></el-icon>
-                退出登录
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-      </div>
       <div class="sidebar-footer" @click="openSettings">
         <el-icon><Setting /></el-icon>
         <span>大模型配置</span>
@@ -407,9 +386,8 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Upload, Document, Plus, List, Setting, User, ArrowDown, SwitchButton } from '@element-plus/icons-vue'
+import { Edit, Delete, Upload, Document, Plus, List, Setting } from '@element-plus/icons-vue'
 import { literaryApi, translateApi, systemApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
 import TermLibraryPanel from '@/components/TermLibraryPanel.vue'
 
 const languages = ref<{ code: string; name: string }[]>([])
@@ -548,16 +526,7 @@ const estimatedParagraphs = computed(() => {
 })
 
 const router = useRouter()
-const auth = useAuthStore()
 const targetLanguages = computed(() => languages.value.filter(l => l.code !== 'auto'))
-
-function handleUserCommand(cmd: string) {
-  if (cmd === 'profile') router.push('/profile')
-  else if (cmd === 'logout') {
-    auth.logout()
-    router.replace('/login')
-  }
-}
 
 const currentStep = computed(() => {
   const task = currentTask.value
@@ -1017,21 +986,6 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   }
 }
 
-.sidebar-user {
-  padding: 10px 18px;
-  border-top: 1px solid #f0f0f0;
-  flex-shrink: 0;
-  font-size: 13px;
-  color: #555;
-}
-.user-trigger {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  width: 100%;
-  .el-icon--right { margin-left: auto; font-size: 12px; }
-}
 .sidebar-footer {
   padding: 12px 18px;
   border-top: 1px solid #f0f0f0;

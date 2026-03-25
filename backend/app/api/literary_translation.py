@@ -1215,6 +1215,20 @@ def generate_csv_content(translation, paragraphs, include_source: bool = False) 
     return output.getvalue()
 
 
+def _safe_export_basename(name: Optional[str]) -> str:
+    """生成安全文件名：<原文名>译文，过滤非法字符并限制长度。"""
+    base = (name or "").strip() or "翻译结果"
+    # Windows/macOS 常见非法字符
+    base = re.sub(r'[\\\\/:*?"<>|]+', "_", base)
+    base = re.sub(r"\s+", " ", base).strip().strip(".")
+    if not base:
+        base = "翻译结果"
+    # 给扩展名预留空间，避免超长
+    if len(base) > 80:
+        base = base[:80].rstrip()
+    return f"{base}译文"
+
+
 @router.post("/translations/{translation_id}/export")
 async def export_translation(
     translation_id: int,
@@ -1267,7 +1281,7 @@ async def export_translation(
     )
 
     return {
-        "filename": f"literary_translation_{translation_id}.{format_ext}",
+        "filename": f"{_safe_export_basename(translation.title)}.{format_ext}",
         "content": content,
         "format": request.format,
         "mime_type": format_mime_types[format_ext]

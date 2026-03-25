@@ -334,10 +334,11 @@
             <el-option label="DeepSeek" value="deepseek" />
             <el-option label="OpenAI" value="openai" />
             <el-option label="SiliconFlow (硅基流动)" value="siliconflow" />
+            <el-option label="Ollama (本地)" value="ollama" />
             <el-option label="自定义 (Custom)" value="custom" />
           </el-select>
         </el-form-item>
-        <el-form-item label="API Key">
+        <el-form-item label="API Key" v-if="aiConfigForm.provider !== 'ollama'">
           <el-input
             v-model="aiConfigForm.api_key"
             :placeholder="aiConfigInfo.has_api_key ? `已配置 (${aiConfigInfo.api_key_masked})` : '请输入 API Key'"
@@ -353,8 +354,8 @@
             留空使用默认: {{ getDefaultModel(aiConfigForm.provider) }}
           </div>
         </el-form-item>
-        <el-form-item v-if="aiConfigForm.provider === 'custom'" label="API 地址">
-          <el-input v-model="aiConfigForm.base_url" placeholder="https://your-api.com/v1" />
+        <el-form-item v-if="aiConfigForm.provider === 'custom' || aiConfigForm.provider === 'ollama'" label="API 地址">
+          <el-input v-model="aiConfigForm.base_url" placeholder="http://127.0.0.1:11434/v1 或 https://your-api.com/v1" />
         </el-form-item>
         <el-row :gutter="16">
           <el-col :span="12">
@@ -371,6 +372,11 @@
         <div class="config-source" v-if="aiConfigInfo.source">
           <el-tag size="small" :type="aiConfigInfo.source === 'database' ? 'success' : 'info'" effect="plain">
             {{ aiConfigInfo.source === 'database' ? '使用自定义配置' : '使用默认配置' }}
+          </el-tag>
+        </div>
+        <div class="config-source" v-if="activeModelInfo.model">
+          <el-tag size="small" type="warning" effect="plain">
+            当前生效模型: {{ activeModelInfo.provider }} / {{ activeModelInfo.model }}
           </el-tag>
         </div>
       </el-form>
@@ -418,6 +424,7 @@ const categoryGroup = ref<string>('literary')
 const showSettings = ref(false)
 const savingConfig = ref(false)
 const aiConfigInfo = ref<any>({ provider: '', source: '', has_api_key: false, api_key_masked: '' })
+const activeModelInfo = ref<any>({ provider: '', model: '', source: '', base_url: '' })
 const aiConfigForm = ref({
   provider: 'deepseek',
   api_key: '',
@@ -431,6 +438,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   openai: 'gpt-4',
   deepseek: 'deepseek-chat',
   siliconflow: 'deepseek-ai/DeepSeek-V3',
+  ollama: 'qwen2.5:7b',
   custom: '',
 }
 
@@ -447,6 +455,8 @@ async function loadAIConfig() {
   try {
     const res = await systemApi.getAIConfig()
     aiConfigInfo.value = res.data
+    const active = await systemApi.getActiveModel()
+    activeModelInfo.value = active.data || {}
   } catch { /* ignore */ }
 }
 

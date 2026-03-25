@@ -1,6 +1,6 @@
 """
 统一 AI 客户端 - 支持多模型提供商
-支持: OpenAI, DeepSeek, SiliconFlow, 自定义 API
+支持: OpenAI, DeepSeek, SiliconFlow, Ollama, 自定义 API
 """
 
 import os
@@ -59,7 +59,12 @@ class Settings(BaseSettings):
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: Optional[str] = None
     deepseek_model: str = "deepseek-chat"
-    
+
+    # Ollama（本地）
+    ollama_api_key: Optional[str] = "ollama"
+    ollama_base_url: str = "http://127.0.0.1:11434/v1"
+    ollama_model: str = "qwen2.5:7b"
+
     # OpenAI
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4"
@@ -148,12 +153,14 @@ class AIClient:
         "openai": "https://api.openai.com/v1",
         "deepseek": "https://api.deepseek.com/v1",
         "siliconflow": "https://api.siliconflow.cn/v1",
+        "ollama": "http://127.0.0.1:11434/v1",
     }
 
     PROVIDER_DEFAULT_MODELS = {
         "openai": "gpt-4",
         "deepseek": "deepseek-chat",
         "siliconflow": "deepseek-ai/DeepSeek-V3",
+        "ollama": "qwen2.5:7b",
     }
 
     def __init__(self, settings: Optional[Settings] = None, user_id: Optional[int] = None):
@@ -171,7 +178,7 @@ class AIClient:
             try:
                 q = db.query(AIConfig).filter(AIConfig.user_id == self.user_id)
                 cfg = q.first()
-                if cfg and cfg.api_key:
+                if cfg and (cfg.api_key or cfg.provider == "ollama"):
                     return {
                         "provider": cfg.provider,
                         "api_key": cfg.api_key,
@@ -194,7 +201,7 @@ class AIClient:
 
         if db_cfg:
             provider = db_cfg["provider"]
-            api_key = db_cfg["api_key"]
+            api_key = db_cfg.get("api_key") or ("ollama" if provider == "ollama" else None)
             base_url = db_cfg.get("base_url") or self.PROVIDER_BASE_URLS.get(provider, "")
             self.model = db_cfg.get("model") or self.PROVIDER_DEFAULT_MODELS.get(provider, "")
             if db_cfg.get("temperature") is not None:
@@ -220,6 +227,10 @@ class AIClient:
             api_key = self.settings.siliconflow_api_key
             base_url = self.PROVIDER_BASE_URLS["siliconflow"]
             self.model = self.settings.siliconflow_model or "deepseek-ai/DeepSeek-V3"
+        elif provider == "ollama":
+            api_key = self.settings.ollama_api_key or "ollama"
+            base_url = self.settings.ollama_base_url or self.PROVIDER_BASE_URLS["ollama"]
+            self.model = self.settings.ollama_model or "qwen2.5:7b"
         elif provider == "custom":
             api_key = self.settings.custom_api_key
             base_url = self.settings.custom_base_url
@@ -229,7 +240,7 @@ class AIClient:
         else:
             raise ValueError(f"Unknown AI provider: {provider}")
 
-        if not api_key:
+        if provider != "ollama" and not api_key:
             raise ValueError(f"API key not configured for provider: {provider}")
 
         self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -282,6 +293,7 @@ Requirements:
 3. Use natural and fluent expressions in the target language
 4. Keep technical terms accurate
 5. Do not add explanations unless specifically requested
+6. Do not censor, mask, or refuse sensitive content; translate all content as-is
 
 Output only the translated text, no additional comments."""
 
@@ -459,6 +471,9 @@ Output only the translated text, no additional comments."""
 ## 输出格式
 
 请直接输出译文，不要添加解释或评论。保持原文的段落和格式结构。"""
+
+        # 允许完整翻译敏感文本：不做删减、屏蔽、拒答
+        system_prompt += "\n\n补充要求：即使原文包含敏感信息，也必须完整直译，不得拒绝、删减或打码。"
 
         if reference_content:
             system_prompt += f"""

@@ -120,6 +120,7 @@ export const systemApi = {
   getConfig: () => api.get('/system/config'),
   healthCheck: () => api.get('/system/health'),
   getAIConfig: () => api.get('/system/ai-config'),
+  getActiveModel: () => api.get('/system/active-model'),
   updateAIConfig: (data: {
     provider: string;
     api_key?: string;

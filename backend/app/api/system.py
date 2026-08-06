@@ -17,6 +17,7 @@ PROVIDER_DEFAULTS = {
     "openai": {"model": "gpt-4", "base_url": "https://api.openai.com/v1"},
     "deepseek": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"},
     "siliconflow": {"model": "deepseek-ai/DeepSeek-V3", "base_url": "https://api.siliconflow.cn/v1"},
+    "ollama": {"model": "llama3.2", "base_url": "http://localhost:11435/v1"},
     "custom": {"model": "", "base_url": ""},
 }
 
@@ -42,6 +43,7 @@ async def get_config(db: Session = Depends(get_db)):
             "openai": settings.openai_model,
             "deepseek": settings.deepseek_model,
             "siliconflow": settings.siliconflow_model,
+            "ollama": settings.ollama_model,
             "custom": settings.custom_model,
         }.get(settings.ai_provider, "unknown"),
         "ai_temperature": settings.ai_temperature,
@@ -82,14 +84,15 @@ async def get_ai_config(db: Session = Depends(get_db)):
     return {
         "provider": settings.ai_provider,
         "api_key_masked": "",
-        "has_api_key": bool(getattr(settings, f"{settings.ai_provider}_api_key", None)),
+        "has_api_key": bool(getattr(settings, f"{settings.ai_provider}_api_key", None)) if settings.ai_provider != "ollama" else True,
         "model": {
             "openai": settings.openai_model,
             "deepseek": settings.deepseek_model,
             "siliconflow": settings.siliconflow_model,
+            "ollama": settings.ollama_model,
             "custom": settings.custom_model,
         }.get(settings.ai_provider, ""),
-        "base_url": settings.custom_base_url or "",
+        "base_url": (settings.ollama_base_url if settings.ai_provider == "ollama" else settings.custom_base_url) or "",
         "temperature": settings.ai_temperature,
         "max_tokens": settings.ai_max_tokens,
         "source": "env",
@@ -107,6 +110,8 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
     db_cfg.provider = request.provider
     if request.api_key is not None:
         db_cfg.api_key = request.api_key
+    if request.provider == "ollama" and (not db_cfg.api_key or not str(db_cfg.api_key).strip()):
+        db_cfg.api_key = "ollama"
     if request.model is not None:
         db_cfg.model = request.model
     if request.base_url is not None:

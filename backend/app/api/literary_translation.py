@@ -1781,6 +1781,138 @@ async def upload_and_translate_file(
     }
 
 
+@router.post("/translations/upload-batch")
+async def upload_and_translate_batch(
+    files: List[UploadFile] = File(..., description="多个文件"),
+    source_lang: str = Form("auto"),
+    target_lang: str = Form("en"),
+    literary_type: str = Form("general"),
+    reference_document_ids: Optional[str] = Form(None),
+    user_requirements: Optional[str] = Form(None),
+    auto_run: bool = Form(True, description="是否对每个任务自动执行四步流程"),
+    db: Session = Depends(get_db)
+):
+    """
+    批量上传文件并创建多个翻译任务。每个文件对应一个任务；可选对每个任务自动执行四步流程。
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个文件")
+    supported = ", ".join(sorted(SUPPORTED_UPLOAD_EXTENSIONS))
+    results = []
+    ref_ids = json.loads(reference_document_ids) if reference_document_ids else []
+    req_text = user_requirements.strip() if user_requirements else None
+
+    for file in files:
+        file_extension = file.filename.split(".")[-1].lower() if "." in file.filename else ""
+        if file_extension not in SUPPORTED_UPLOAD_EXTENSIONS:
+            results.append({
+                "filename": file.filename,
+                "translation_id": None,
+                "error": f"不支持的文件格式: {file_extension}. 支持: {supported}",
+                "total_chunks": 0,
+                "total_chars": 0,
+                "current_step": 1,
+                "status": "failed",
+            })
+            continue
+        try:
+            content = await file.read()
+            if len(content) > MAX_UPLOAD_SIZE:
+                results.append({
+                    "filename": file.filename,
+                    "translation_id": None,
+                    "error": f"文件过大（最大 {MAX_UPLOAD_SIZE // 1024 // 1024}MB）",
+                    "total_chunks": 0,
+                    "total_chars": 0,
+                    "current_step": 1,
+                    "status": "failed",
+                })
+                continue
+            text_content = parse_text_file(content, file_extension)
+        except ValueError as e:
+            results.append({
+                "filename": file.filename,
+                "translation_id": None,
+                "error": str(e),
+                "total_chunks": 0,
+                "total_chars": 0,
+                "current_step": 1,
+                "status": "failed",
+            })
+            continue
+        if not text_content.strip():
+            results.append({
+                "filename": file.filename,
+                "translation_id": None,
+                "error": "文件内容为空",
+                "total_chunks": 0,
+                "total_chars": 0,
+                "current_step": 1,
+                "status": "failed",
+            })
+            continue
+
+        translation = LiteraryTranslation(
+            title=file.filename,
+            source_text=text_content,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            literary_type=literary_type,
+            reference_document_ids=ref_ids,
+            user_requirements=req_text,
+            status=LiteraryTranslationStatus.PENDING,
+            current_step=1,
+        )
+        db.add(translation)
+        db.commit()
+        db.refresh(translation)
+        chunks = split_long_text(text_content)
+        for idx, chunk in enumerate(chunks):
+            paragraph = LiteraryParagraph(
+                translation_id=translation.id,
+                paragraph_index=idx,
+                source_text=chunk,
+            )
+            db.add(paragraph)
+        db.commit()
+
+        if auto_run:
+            try:
+                await _execute_step1(translation.id, db)
+                await _execute_step2(translation.id, db)
+                await _execute_step3(translation.id, db)
+                await _execute_step4(translation.id, db)
+                db.refresh(translation)
+            except HTTPException:
+                raise
+            except Exception as e:
+                results.append({
+                    "filename": file.filename,
+                    "translation_id": translation.id,
+                    "error": f"自动执行四步流程失败: {str(e)}",
+                    "total_chunks": len(chunks),
+                    "total_chars": len(text_content),
+                    "current_step": translation.current_step,
+                    "status": translation.status,
+                })
+                continue
+
+        results.append({
+            "filename": file.filename,
+            "translation_id": translation.id,
+            "error": None,
+            "total_chunks": len(chunks),
+            "total_chars": len(text_content),
+            "current_step": translation.current_step,
+            "status": translation.status,
+        })
+
+    return {
+        "message": f"批量上传完成，共 {len(files)} 个文件，成功 {sum(1 for r in results if r.get('translation_id'))} 个",
+        "results": results,
+    }
+
+
 @router.post("/translations/{translation_id}/translate-all")
 async def translate_all_chunks(
     translation_id: int,

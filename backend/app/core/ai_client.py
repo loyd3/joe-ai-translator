@@ -70,7 +70,11 @@ class Settings(BaseSettings):
     custom_api_key: Optional[str] = None
     custom_base_url: Optional[str] = None
     custom_model: Optional[str] = None
-    
+
+    # Ollama（本地模型，通常无需 API Key）
+    ollama_base_url: Optional[str] = None
+    ollama_model: str = "llama3.2"
+
     class Config:
         # 优先项目根 .env，不存在则用当前目录 .env
         env_file = str(_ENV_FILE) if _ENV_FILE.exists() else ".env"
@@ -146,12 +150,14 @@ class AIClient:
         "openai": "https://api.openai.com/v1",
         "deepseek": "https://api.deepseek.com/v1",
         "siliconflow": "https://api.siliconflow.cn/v1",
+        "ollama": "http://localhost:11435/v1",
     }
 
     PROVIDER_DEFAULT_MODELS = {
         "openai": "gpt-4",
         "deepseek": "deepseek-chat",
         "siliconflow": "deepseek-ai/DeepSeek-V3",
+        "ollama": "llama3.2",
     }
 
     def __init__(self, settings: Optional[Settings] = None):
@@ -199,6 +205,8 @@ class AIClient:
                 self._db_max_tokens = db_cfg["max_tokens"]
             if provider == "custom" and not base_url:
                 raise ValueError("Custom provider requires base_url")
+            if provider == "ollama" and (not api_key or not str(api_key).strip()):
+                api_key = "ollama"
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
             _safe_print(f"[AIClient] Initialized from DB: provider={provider}, model={self.model}")
             return
@@ -222,10 +230,14 @@ class AIClient:
             self.model = self.settings.custom_model
             if not base_url:
                 raise ValueError("Custom provider requires custom_base_url")
+        elif provider == "ollama":
+            api_key = getattr(self.settings, "ollama_api_key", None) or "ollama"
+            base_url = self.settings.ollama_base_url or self.PROVIDER_BASE_URLS["ollama"]
+            self.model = self.settings.ollama_model or self.PROVIDER_DEFAULT_MODELS["ollama"]
         else:
             raise ValueError(f"Unknown AI provider: {provider}")
 
-        if not api_key:
+        if not api_key and provider != "ollama":
             raise ValueError(f"API key not configured for provider: {provider}")
 
         self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)

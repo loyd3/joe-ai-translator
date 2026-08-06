@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { ElLoading } from 'element-plus'
+import { ElLoading, ElMessage } from 'element-plus'
 
 const api = axios.create({
   baseURL: '/api',
@@ -48,6 +48,13 @@ api.interceptors.response.use(
           globalLoading.close()
           globalLoading = null
         }
+      }
+      // 后台未启动或代理不可达时给出明确提示
+      const isNetworkError =
+        !error.response &&
+        (error.code === 'ERR_NETWORK' || error.message?.includes('Network Error'))
+      if (isNetworkError) {
+        ElMessage.error('后台接口连接失败，请确认已启动后端服务（运行 python start.py 或在后端目录运行 uvicorn，端口 8000）')
       }
     } catch {}
     return Promise.reject(error)
@@ -277,6 +284,13 @@ export const literaryApi = {
     api.post('/literary/translations/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     }),
+  // 批量上传文件创建多个翻译任务
+  uploadAndTranslateBatch: (formData: FormData) =>
+    api.post<{ message: string; results: Array<{ filename: string; translation_id: number | null; error: string | null; total_chunks: number; total_chars: number; current_step: number; status: string }> }>(
+      '/literary/translations/upload-batch',
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    ),
 
   // 一键翻译所有段落
   translateAllChunks: (translationId: number) =>

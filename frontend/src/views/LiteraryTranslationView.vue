@@ -21,9 +21,14 @@
               <el-icon><List /></el-icon>
             </el-button>
           </el-tooltip>
-          <el-button type="primary" size="small" circle @click="createNewTask">
-            <el-icon><Plus /></el-icon>
-          </el-button>
+<el-button type="primary" size="small" circle @click="createNewTask">
+              <el-icon><Plus /></el-icon>
+            </el-button>
+          <el-tooltip content="批量上传文件" placement="top">
+            <el-button size="small" circle @click="openBatchUpload">
+              <el-icon><Upload /></el-icon>
+            </el-button>
+          </el-tooltip>
         </div>
       </div>
 
@@ -307,6 +312,77 @@
       </template>
     </el-dialog>
 
+    <!-- 批量上传对话框 -->
+    <el-dialog v-model="showBatchUploadDialog" title="批量上传文件" width="560px" destroy-on-close @close="batchFileList = []">
+      <el-form :model="batchUploadForm" label-position="top">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="源语言">
+              <el-select v-model="batchUploadForm.source_lang" style="width: 100%;">
+                <el-option v-for="lang in languages" :key="lang.code" :label="lang.name" :value="lang.code" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="目标语言">
+              <el-select v-model="batchUploadForm.target_lang" style="width: 100%;">
+                <el-option v-for="lang in targetLanguages" :key="lang.code" :label="lang.name" :value="lang.code" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="翻译类型">
+          <el-select v-model="batchUploadForm.literary_type" style="width: 100%;">
+            <el-option-group label="文学">
+              <el-option label="一般" value="general" />
+              <el-option label="诗歌" value="poetry" />
+              <el-option label="散文" value="prose" />
+              <el-option label="小说" value="novel" />
+              <el-option label="戏剧" value="drama" />
+            </el-option-group>
+            <el-option-group label="专业">
+              <el-option label="科技" value="tech" />
+              <el-option label="商业" value="business" />
+              <el-option label="贸易" value="trade" />
+              <el-option label="法律" value="legal" />
+              <el-option label="医学" value="medical" />
+            </el-option-group>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="翻译需求（选填）">
+          <el-input v-model="batchUploadForm.user_requirements" type="textarea" :rows="2" placeholder="如：偏书面语、保留专有名词原文" maxlength="500" show-word-limit />
+        </el-form-item>
+        <el-form-item label="上传后自动执行四步流程">
+          <el-switch v-model="batchUploadForm.auto_run" />
+        </el-form-item>
+        <el-form-item label="选择文件">
+          <el-upload
+            ref="batchUploadRef"
+            :auto-upload="false"
+            :file-list="batchFileList"
+            :on-change="onBatchFileChange"
+            :on-remove="onBatchFileRemove"
+            :accept="uploadAccept"
+            :limit="50"
+            multiple
+            drag
+          >
+            <el-icon class="el-icon--upload"><Upload /></el-icon>
+            <div class="el-upload__text">将文件拖到此处，或<em>点击选择</em></div>
+            <template #tip>
+              <div class="el-upload__tip">支持 txt、docx、pdf、mobi、md 等，单文件最大 20MB，最多 50 个</div>
+            </template>
+          </el-upload>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showBatchUploadDialog = false">取消</el-button>
+        <el-button type="primary" @click="submitBatchUpload" :loading="batchUploading" :disabled="batchFileList.length === 0">
+          开始上传 ({{ batchFileList.length }} 个文件)
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="showEditTask" title="修改任务" width="400px" destroy-on-close>
       <el-form v-if="editingTask" label-position="top">
         <el-form-item label="标题">
@@ -334,10 +410,11 @@
             <el-option label="DeepSeek" value="deepseek" />
             <el-option label="OpenAI" value="openai" />
             <el-option label="SiliconFlow (硅基流动)" value="siliconflow" />
+            <el-option label="Ollama (本地模型)" value="ollama" />
             <el-option label="自定义 (Custom)" value="custom" />
           </el-select>
         </el-form-item>
-        <el-form-item label="API Key">
+        <el-form-item v-if="aiConfigForm.provider !== 'ollama'" label="API Key">
           <el-input
             v-model="aiConfigForm.api_key"
             :placeholder="aiConfigInfo.has_api_key ? `已配置 (${aiConfigInfo.api_key_masked})` : '请输入 API Key'"
@@ -355,6 +432,10 @@
         </el-form-item>
         <el-form-item v-if="aiConfigForm.provider === 'custom'" label="API 地址">
           <el-input v-model="aiConfigForm.base_url" placeholder="https://your-api.com/v1" />
+        </el-form-item>
+        <el-form-item v-if="aiConfigForm.provider === 'ollama'" label="Ollama 地址">
+          <el-input v-model="aiConfigForm.base_url" placeholder="http://localhost:11435/v1" />
+          <div class="form-hint">本地无需 API Key，留空使用默认</div>
         </el-form-item>
         <el-row :gutter="16">
           <el-col :span="12">
@@ -417,6 +498,17 @@ const categoryGroup = ref<string>('literary')
 
 const showSettings = ref(false)
 const savingConfig = ref(false)
+const showBatchUploadDialog = ref(false)
+const batchUploading = ref(false)
+const batchUploadRef = ref<any>(null)
+const batchFileList = ref<any[]>([])
+const batchUploadForm = ref({
+  source_lang: 'auto',
+  target_lang: 'en',
+  literary_type: 'general' as string,
+  user_requirements: '',
+  auto_run: true,
+})
 const aiConfigInfo = ref<any>({ provider: '', source: '', has_api_key: false, api_key_masked: '' })
 const aiConfigForm = ref({
   provider: 'deepseek',
@@ -431,6 +523,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   openai: 'gpt-4',
   deepseek: 'deepseek-chat',
   siliconflow: 'deepseek-ai/DeepSeek-V3',
+  ollama: 'llama3.2',
   custom: '',
 }
 
@@ -448,6 +541,60 @@ async function loadAIConfig() {
     const res = await systemApi.getAIConfig()
     aiConfigInfo.value = res.data
   } catch { /* ignore */ }
+}
+
+function openBatchUpload() {
+  batchUploadForm.value = {
+    source_lang: 'auto',
+    target_lang: 'en',
+    literary_type: categoryGroup.value === 'professional' ? 'tech' : 'general',
+    user_requirements: '',
+    auto_run: true,
+  }
+  batchFileList.value = []
+  showBatchUploadDialog.value = true
+}
+
+function onBatchFileChange(_uploadFile: any, uploadFiles: any[]) {
+  batchFileList.value = uploadFiles
+}
+
+function onBatchFileRemove(_uploadFile: any, uploadFiles: any[]) {
+  batchFileList.value = uploadFiles
+}
+
+async function submitBatchUpload() {
+  const files = batchFileList.value.map((f: any) => f.raw).filter(Boolean)
+  if (files.length === 0) {
+    ElMessage.warning('请先选择文件')
+    return
+  }
+  batchUploading.value = true
+  try {
+    const form = new FormData()
+    for (const file of files) form.append('files', file)
+    form.append('source_lang', batchUploadForm.value.source_lang)
+    form.append('target_lang', batchUploadForm.value.target_lang)
+    form.append('literary_type', batchUploadForm.value.literary_type)
+    form.append('auto_run', String(batchUploadForm.value.auto_run))
+    if (batchUploadForm.value.user_requirements?.trim()) {
+      form.append('user_requirements', batchUploadForm.value.user_requirements.trim())
+    }
+    const res = await literaryApi.uploadAndTranslateBatch(form)
+    const data = res.data
+    const ok = data.results?.filter((r: any) => r.translation_id).length ?? 0
+    const err = data.results?.filter((r: any) => r.error).length ?? 0
+    ElMessage.success(data.message || `成功 ${ok} 个${err ? `，失败 ${err} 个` : ''}`)
+    showBatchUploadDialog.value = false
+    batchFileList.value = []
+    await loadTasks(true)
+    const firstId = data.results?.find((r: any) => r.translation_id)?.translation_id
+    if (firstId) await selectTask(taskList.value.find((t: any) => t.id === firstId))
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '批量上传失败')
+  } finally {
+    batchUploading.value = false
+  }
 }
 
 function openSettings() {

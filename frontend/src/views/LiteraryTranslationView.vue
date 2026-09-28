@@ -80,6 +80,10 @@
           <el-icon><Sunny /></el-icon>
           <span>主题设置</span>
         </div>
+        <div class="sidebar-footer" @click="goToGlobalDictionary">
+          <el-icon><Collection /></el-icon>
+          <span>大词典</span>
+        </div>
         <div class="sidebar-footer" @click="goToStylePage">
           <el-icon><Brush /></el-icon>
           <span>文风设定</span>
@@ -96,10 +100,11 @@
     <div class="main-content">
       <TermLibraryView
         v-if="panelMode === 'terms'"
-        :translation-id="currentTask?.id"
-        :literary-type="currentTask?.literary_type"
-        :source-lang="currentTask?.source_lang"
-        :target-lang="currentTask?.target_lang"
+        :system-only="termLibrarySystem"
+        :translation-id="termLibrarySystem ? undefined : currentTask?.id"
+        :literary-type="termLibrarySystem ? undefined : currentTask?.literary_type"
+        :source-lang="termLibrarySystem ? undefined : currentTask?.source_lang"
+        :target-lang="termLibrarySystem ? undefined : currentTask?.target_lang"
         @back="closePanel"
       />
       <StoryStructurePanel
@@ -809,12 +814,20 @@ const stepItems = computed(() => {
   })
 })
 
+const termLibrarySystem = ref(false)
+
 const goToResultPage = () => {
   if (!currentTask.value?.id) return
   panelMode.value = 'result'
 }
 
 const goToTermLibrary = () => {
+  termLibrarySystem.value = false
+  panelMode.value = 'terms'
+}
+
+const goToGlobalDictionary = () => {
+  termLibrarySystem.value = true
   panelMode.value = 'terms'
 }
 
@@ -1847,6 +1860,12 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
     font-size: 15px;
     line-height: 1.8;
     color: var(--ins-ink);
+  }
+
+  :deep(.el-textarea__inner) {
+    font-size: 16px;
+    line-height: 1.85;
+    font-family: inherit;
   }
 
   &.active {

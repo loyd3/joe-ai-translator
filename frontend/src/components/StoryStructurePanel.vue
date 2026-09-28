@@ -726,6 +726,12 @@ onUnmounted(() => {
 .edit-stack {
   display: grid;
   gap: 10px;
+
+  :deep(.el-textarea__inner),
+  :deep(.el-input__inner) {
+    font-size: 16px;
+    line-height: 1.75;
+  }
 }
 
 .read-card,

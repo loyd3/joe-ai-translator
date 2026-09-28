@@ -308,6 +308,9 @@ export const literaryApi = {
   // 小词库提升到大词库
   promoteTerm: (id: number) => api.post(`/literary/terms/${id}/promote`),
 
+  // 把各项目小词典归并进系统大词典
+  syncGlobalTerms: () => api.post('/literary/terms/sync-global'),
+
   // 获取词汇分类列表
   getTermCategories: (params?: {
     literary_type?: string;

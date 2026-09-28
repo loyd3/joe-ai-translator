@@ -750,6 +750,12 @@ watch(id, load, { immediate: true })
     color: var(--ins-ink);
   }
 
+  :deep(.el-textarea__inner) {
+    font-size: 16px;
+    line-height: 1.85;
+    font-family: inherit;
+  }
+
   .version-empty {
     color: var(--ins-muted);
     font-size: 14px;

@@ -168,8 +168,10 @@ const props = withDefaults(defineProps<{
   literaryType?: string
   sourceLang?: string
   targetLang?: string
+  reloadToken?: number
 }>(), {
   scope: 'global',
+  reloadToken: 0,
 })
 
 const TYPE_LABELS: Record<string, string> = {
@@ -355,7 +357,7 @@ const resetForm = () => {
 }
 
 watch(
-  () => [props.scope, props.translationId, props.literaryType, projectType.value],
+  () => [props.scope, props.translationId, props.literaryType, projectType.value, props.reloadToken],
   () => {
     selectedCategory.value = ''
     loadTerms()

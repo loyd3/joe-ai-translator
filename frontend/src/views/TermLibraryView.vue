@@ -5,26 +5,33 @@
         <el-icon><ArrowLeft /></el-icon>
         返回
       </el-button>
-      <h1 class="title">词库</h1>
-      <el-radio-group v-model="libraryScope" size="small" class="scope-switch">
+      <h1 class="title">{{ systemOnly ? '大词典' : '词库' }}</h1>
+      <el-radio-group v-if="!systemOnly" v-model="libraryScope" size="small" class="scope-switch">
         <el-radio-button label="document" :disabled="!translationId">小词库</el-radio-button>
         <el-radio-button label="global">大词库</el-radio-button>
       </el-radio-group>
+      <el-button
+        v-if="systemOnly || libraryScope === 'global'"
+        size="small"
+        :loading="syncing"
+        @click="syncFromProjects"
+      >归并小词典</el-button>
     </div>
     <div class="page-body">
       <div class="term-card">
         <p class="scope-hint">
-          {{ libraryScope === 'document'
-            ? '小词库：仅当前文档的词汇，翻译时优先使用。'
-            : '大词库：整个系统的词汇，按项目分类（小说、科技等）管理。' }}
+          {{ (systemOnly || libraryScope === 'global')
+            ? '系统大词典：各项目小词典按文学/专业类型归类后保存在这里，全系统共用。'
+            : '小词库：仅当前文档的词汇，翻译时优先使用。' }}
         </p>
         <TermLibraryPanel
-          :key="libraryScope"
-          :scope="libraryScope"
-          :translation-id="translationId"
-          :literary-type="literaryType"
-          :source-lang="sourceLang"
-          :target-lang="targetLang"
+          :key="panelKey"
+          :scope="systemOnly ? 'global' : libraryScope"
+          :translation-id="systemOnly ? undefined : translationId"
+          :literary-type="systemOnly ? undefined : literaryType"
+          :source-lang="systemOnly ? undefined : sourceLang"
+          :target-lang="systemOnly ? undefined : targetLang"
+          :reload-token="reloadToken"
         />
       </div>
     </div>
@@ -32,19 +39,30 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import TermLibraryPanel from '@/components/TermLibraryPanel.vue'
+import { literaryApi } from '@/api'
 
 const props = defineProps<{
   translationId?: number
   literaryType?: string
   sourceLang?: string
   targetLang?: string
+  systemOnly?: boolean
 }>()
 
 const emit = defineEmits<{ back: [] }>()
-const libraryScope = ref<'document' | 'global'>(props.translationId ? 'document' : 'global')
+const libraryScope = ref<'document' | 'global'>(
+  props.systemOnly || !props.translationId ? 'global' : 'document'
+)
+const syncing = ref(false)
+const reloadToken = ref(0)
+
+const panelKey = computed(() =>
+  `${props.systemOnly ? 'system' : libraryScope.value}-${reloadToken.value}`
+)
 
 watch(
   () => props.translationId,
@@ -52,6 +70,20 @@ watch(
     if (!id && libraryScope.value === 'document') libraryScope.value = 'global'
   }
 )
+
+const syncFromProjects = async () => {
+  syncing.value = true
+  try {
+    const res = await literaryApi.syncGlobalTerms()
+    const data = res.data || {}
+    ElMessage.success(`已归并：新增 ${data.created || 0}，更新 ${data.updated || 0}`)
+    reloadToken.value += 1
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '归并失败')
+  } finally {
+    syncing.value = false
+  }
+}
 </script>
 
 <style scoped lang="scss">
@@ -64,8 +96,12 @@ watch(
 }
 
 .page-header {
-  .scope-switch {
+  .scope-switch,
+  .el-button:last-child {
     margin-left: auto;
+  }
+  .scope-switch + .el-button {
+    margin-left: 8px;
   }
 }
 

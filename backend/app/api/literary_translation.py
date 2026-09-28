@@ -1585,6 +1585,104 @@ async def list_professional_terms(
     return query.offset(skip).limit(limit).all()
 
 
+def _upsert_global_term(
+    db: Session,
+    *,
+    source_term: str,
+    target_term: str,
+    literary_type: str,
+    source_lang: str,
+    target_lang: str,
+    category: Optional[str] = None,
+    description: Optional[str] = None,
+    usage: int = 1,
+    cache: Optional[dict] = None,
+) -> str:
+    """把一条词汇归入系统大词典（translation_id 为空）。同分类同语言对只保留一条。"""
+    source_term = (source_term or "").strip()
+    target_term = (target_term or "").strip()
+    literary_type = literary_type or "general"
+    if not source_term or not target_term:
+        return "skipped"
+    key = (source_term, literary_type, source_lang, target_lang)
+    existing = cache.get(key) if cache is not None else None
+    if existing is None:
+        existing = db.query(ProfessionalTerm).filter(
+            ProfessionalTerm.source_term == source_term,
+            ProfessionalTerm.literary_type == literary_type,
+            ProfessionalTerm.source_lang == source_lang,
+            ProfessionalTerm.target_lang == target_lang,
+            ProfessionalTerm.translation_id.is_(None),
+        ).first()
+    if existing:
+        if category and not existing.category:
+            existing.category = category
+        if description and not existing.description:
+            existing.description = description
+        existing.usage_count = (existing.usage_count or 0) + max(usage or 1, 1)
+        if cache is not None:
+            cache[key] = existing
+        return "updated"
+    created = ProfessionalTerm(
+        source_term=source_term,
+        target_term=target_term,
+        literary_type=literary_type,
+        category=category,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        description=description,
+        translation_id=None,
+        usage_count=max(usage or 1, 1),
+        is_verified=True,
+    )
+    db.add(created)
+    if cache is not None:
+        cache[key] = created
+    return "created"
+
+
+def sync_document_terms_into_global(db: Session) -> dict:
+    """把各项目小词典词汇按文学类型归并进系统大词典，并写入数据库。小词典条目保留。"""
+    rows = db.query(ProfessionalTerm, LiteraryTranslation.literary_type).outerjoin(
+        LiteraryTranslation, ProfessionalTerm.translation_id == LiteraryTranslation.id
+    ).filter(ProfessionalTerm.translation_id.isnot(None)).all()
+    created = updated = skipped = 0
+    cache: dict = {}
+    for term, parent_type in rows:
+        result = _upsert_global_term(
+            db,
+            source_term=term.source_term,
+            target_term=term.target_term,
+            literary_type=term.literary_type or parent_type or "general",
+            source_lang=term.source_lang,
+            target_lang=term.target_lang,
+            category=term.category,
+            description=term.description,
+            usage=term.usage_count or 1,
+            cache=cache,
+        )
+        if result == "created":
+            created += 1
+        elif result == "updated":
+            updated += 1
+        else:
+            skipped += 1
+    db.commit()
+    return {
+        "scanned": len(rows),
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "global_total": db.query(ProfessionalTerm).filter(ProfessionalTerm.translation_id.is_(None)).count(),
+    }
+
+
+@router.post("/terms/sync-global")
+async def sync_terms_into_global_dictionary(db: Session = Depends(get_db)):
+    """将全部项目小词典归类写入系统大词典。"""
+    return sync_document_terms_into_global(db)
+
+
 @router.post("/terms", response_model=ProfessionalTermResponse)
 async def create_professional_term(
     request: ProfessionalTermCreate,
@@ -1635,6 +1733,19 @@ async def create_professional_term(
     db.add(term)
     db.commit()
     db.refresh(term)
+    if request.translation_id is not None:
+        _upsert_global_term(
+            db,
+            source_term=term.source_term,
+            target_term=term.target_term,
+            literary_type=literary_type,
+            source_lang=term.source_lang,
+            target_lang=term.target_lang,
+            category=term.category,
+            description=term.description,
+            usage=1,
+        )
+        db.commit()
     return term
 
 
@@ -1844,6 +1955,7 @@ async def extract_terms_from_translation(
             new_count += 1
 
     db.commit()
+    sync_document_terms_into_global(db)
 
     # 创建总结记录
     summary = TranslationTermSummary(
@@ -1956,6 +2068,7 @@ async def auto_extract_terms_after_finalize(
                 new_count += 1
 
         db.commit()
+        sync_document_terms_into_global(db)
 
         # 创建总结记录
         summary = TranslationTermSummary(

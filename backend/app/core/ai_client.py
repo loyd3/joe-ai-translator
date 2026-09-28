@@ -150,13 +150,23 @@ class AIClient:
         "openai": "https://api.openai.com/v1",
         "deepseek": "https://api.deepseek.com/v1",
         "siliconflow": "https://api.siliconflow.cn/v1",
-        "ollama": "http://localhost:11435/v1",
+        "moonshot": "https://api.moonshot.cn/v1",
+        "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+        "groq": "https://api.groq.com/openai/v1",
+        "openrouter": "https://openrouter.ai/api/v1",
+        "ollama": "http://localhost:11434/v1",
     }
 
     PROVIDER_DEFAULT_MODELS = {
-        "openai": "gpt-4",
+        "openai": "gpt-4o",
         "deepseek": "deepseek-chat",
         "siliconflow": "deepseek-ai/DeepSeek-V3",
+        "moonshot": "moonshot-v1-128k",
+        "qwen": "qwen-plus",
+        "zhipu": "glm-4-flash",
+        "groq": "llama-3.3-70b-versatile",
+        "openrouter": "openai/gpt-4o-mini",
         "ollama": "llama3.2",
     }
 
@@ -181,6 +191,10 @@ class AIClient:
                         "base_url": cfg.base_url,
                         "temperature": cfg.temperature,
                         "max_tokens": cfg.max_tokens,
+                        "top_p": cfg.top_p,
+                        "frequency_penalty": cfg.frequency_penalty,
+                        "presence_penalty": cfg.presence_penalty,
+                        "timeout_seconds": cfg.timeout_seconds,
                     }
             finally:
                 db.close()
@@ -193,6 +207,10 @@ class AIClient:
         db_cfg = self._load_db_config()
         self._db_temperature = None
         self._db_max_tokens = None
+        self._db_top_p = None
+        self._db_frequency_penalty = None
+        self._db_presence_penalty = None
+        self._db_timeout_seconds = None
 
         if db_cfg:
             provider = db_cfg["provider"]
@@ -203,11 +221,20 @@ class AIClient:
                 self._db_temperature = db_cfg["temperature"]
             if db_cfg.get("max_tokens") is not None:
                 self._db_max_tokens = db_cfg["max_tokens"]
+            if db_cfg.get("top_p") is not None:
+                self._db_top_p = db_cfg["top_p"]
+            if db_cfg.get("frequency_penalty") is not None:
+                self._db_frequency_penalty = db_cfg["frequency_penalty"]
+            if db_cfg.get("presence_penalty") is not None:
+                self._db_presence_penalty = db_cfg["presence_penalty"]
+            if db_cfg.get("timeout_seconds") is not None:
+                self._db_timeout_seconds = db_cfg["timeout_seconds"]
             if provider == "custom" and not base_url:
                 raise ValueError("Custom provider requires base_url")
             if provider == "ollama" and (not api_key or not str(api_key).strip()):
                 api_key = "ollama"
-            self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+            timeout = self._db_timeout_seconds or 120
+            self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
             _safe_print(f"[AIClient] Initialized from DB: provider={provider}, model={self.model}")
             return
 
@@ -215,7 +242,7 @@ class AIClient:
         if provider == "openai":
             api_key = self.settings.openai_api_key
             base_url = self.PROVIDER_BASE_URLS["openai"]
-            self.model = self.settings.openai_model or "gpt-4"
+            self.model = self.settings.openai_model or "gpt-4o"
         elif provider == "deepseek":
             api_key = self.settings.deepseek_api_key
             base_url = self.settings.deepseek_base_url or self.PROVIDER_BASE_URLS["deepseek"]
@@ -234,13 +261,17 @@ class AIClient:
             api_key = getattr(self.settings, "ollama_api_key", None) or "ollama"
             base_url = self.settings.ollama_base_url or self.PROVIDER_BASE_URLS["ollama"]
             self.model = self.settings.ollama_model or self.PROVIDER_DEFAULT_MODELS["ollama"]
+        elif provider in self.PROVIDER_BASE_URLS:
+            api_key = getattr(self.settings, f"{provider}_api_key", None)
+            base_url = getattr(self.settings, f"{provider}_base_url", None) or self.PROVIDER_BASE_URLS[provider]
+            self.model = getattr(self.settings, f"{provider}_model", None) or self.PROVIDER_DEFAULT_MODELS.get(provider, "")
         else:
             raise ValueError(f"Unknown AI provider: {provider}")
 
         if not api_key and provider != "ollama":
             raise ValueError(f"API key not configured for provider: {provider}")
 
-        self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=120)
         _safe_print(f"[AIClient] Initialized from .env: provider={provider}, model={self.model}")
 
     def reload_from_db(self):
@@ -257,6 +288,25 @@ class AIClient:
         if self._db_temperature is not None:
             return self._db_temperature
         return self.settings.ai_temperature
+
+    def _sampling_kwargs(
+        self,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> dict:
+        """统一采样参数；仅在配置了才带上可选字段，兼容各家 API。"""
+        kwargs = {
+            "temperature": temperature if temperature is not None else self.effective_temperature,
+            "max_tokens": max_tokens or self.effective_max_tokens,
+        }
+        if self._db_top_p is not None:
+            kwargs["top_p"] = self._db_top_p
+        if self._db_frequency_penalty is not None:
+            kwargs["frequency_penalty"] = self._db_frequency_penalty
+        if self._db_presence_penalty is not None:
+            kwargs["presence_penalty"] = self._db_presence_penalty
+        return kwargs
 
     @property
     def client(self):
@@ -300,6 +350,20 @@ Output only the translated text, no additional comments."""
         ]
         return messages
 
+    async def chat_completion(
+        self,
+        messages: list,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+    ) -> str:
+        """通用对话补全（文风提炼等）。"""
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            **self._sampling_kwargs(temperature=temperature, max_tokens=max_tokens),
+        )
+        return (response.choices[0].message.content or "").strip()
+
     async def translate(
         self,
         text: str,
@@ -315,8 +379,7 @@ Output only the translated text, no additional comments."""
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=temperature or self.effective_temperature,
-            max_tokens=max_tokens or self.effective_max_tokens,
+            **self._sampling_kwargs(temperature=temperature, max_tokens=max_tokens),
         )
         return response.choices[0].message.content.strip()
 
@@ -335,9 +398,8 @@ Output only the translated text, no additional comments."""
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=temperature or self.effective_temperature,
-            max_tokens=max_tokens or self.effective_max_tokens,
             stream=True,
+            **self._sampling_kwargs(temperature=temperature, max_tokens=max_tokens),
         )
         async for chunk in stream:
             if chunk.choices[0].delta.content:
@@ -438,6 +500,7 @@ Output only the translated text, no additional comments."""
 - 用词层次：通俗日常 / 中性正式 / 高雅考究 / 粗犷直白
 
 **译文必须匹配原文的风格层次。** 原文若是口语化的随笔，译文也应自然随性；原文若是典雅的古典诗词，译文再追求音韵与意境；原文若是冷峻的现代小说，译文也应简洁克制。切忌一律套用华丽辞藻。
+若系统提供了翻译风格设定，那是「译者习惯」：在贴合原文之后叠加（如多用成语、多用短句），不能覆盖原文气质。习惯与原文冲突时，以原文为准。
 
 ## 第二原则：在原文风格内运用三美优化
 
@@ -488,17 +551,26 @@ Output only the translated text, no additional comments."""
         target_lang: str,
         literary_type: str = "general",
         reference_content: Optional[str] = None,
+        guidance: Optional[str] = None,
+        neighbor_context: Optional[str] = None,
     ) -> str:
         """翻译 - 第一步：初译"""
         messages = self.build_literary_translation_prompt(
             text, source_lang, target_lang, literary_type, reference_content
         )
+        if guidance and guidance.strip():
+            messages[0]["content"] += (
+                "\n\n## 翻译附加设定（翻译风格/故事档案，必须遵守，不要写进译文）\n"
+                "翻译风格 = 贴合原文 + 译者习惯。先复现原文，再把习惯自然融入；冲突时以原文为准。\n"
+                + guidance.strip()
+            )
+        if neighbor_context and neighbor_context.strip():
+            messages[1]["content"] = neighbor_context.strip() + "\n\n" + messages[1]["content"]
         temp = 0.4 if self.is_professional_type(literary_type) else 0.7
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=temp,
-            max_tokens=self.effective_max_tokens,
+            **self._sampling_kwargs(temperature=temp),
         )
         return response.choices[0].message.content.strip()
 
@@ -509,6 +581,7 @@ Output only the translated text, no additional comments."""
         source_lang: str,
         target_lang: str,
         literary_type: str = "general",
+        guidance: Optional[str] = None,
     ) -> dict:
         """翻译 - 第二步：校验"""
         source_name = self.get_language_name(source_lang)
@@ -610,16 +683,15 @@ Output only the translated text, no additional comments."""
 }}"""
 
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": self._apply_story_guidance(system_prompt, guidance)},
             {"role": "user", "content": f"【原文】({source_name}):\n{source_text}\n\n【译文】({target_name}):\n{translated_text}\n\n请进行校验评估。"}
         ]
         
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=0.3,
-            max_tokens=self.effective_max_tokens,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            **self._sampling_kwargs(temperature=0.3),
         )
         
         import json
@@ -649,6 +721,7 @@ Output only the translated text, no additional comments."""
         source_lang: str,
         target_lang: str,
         literary_type: str = "general",
+        guidance: Optional[str] = None,
     ) -> dict:
         """
         文学翻译 - 第三步：润色
@@ -731,16 +804,15 @@ Output only the translated text, no additional comments."""
         suggestions_text = "\n".join([f"- {s}" for s in suggestions]) if suggestions else "无特别建议"
         
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": self._apply_story_guidance(system_prompt, guidance)},
             {"role": "user", "content": f"【原文】({source_name}):\n{source_text}\n\n【待润色译文】({target_name}):\n{verified_translation}\n\n【校验反馈】\n发现的问题：\n{issues_text}\n\n改进建议：\n{suggestions_text}\n\n请进行润色。"}
         ]
         
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=0.5,
-            max_tokens=self.effective_max_tokens,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            **self._sampling_kwargs(temperature=0.5),
         )
         
         import json
@@ -757,6 +829,75 @@ Output only the translated text, no additional comments."""
                 "beauty_meaning_enhancement": "保持原有水平"
             }
 
+    def _apply_story_guidance(self, system_prompt: str, guidance: Optional[str]) -> str:
+        if not guidance or not guidance.strip():
+            return system_prompt
+        return system_prompt + (
+            "\n\n## 翻译附加设定（翻译风格/故事档案，必须遵守，不要写进译文）\n"
+            "翻译风格 = 贴合原文 + 译者习惯。先复现原文，再把习惯自然融入；冲突时以原文为准。\n"
+            + guidance.strip()
+        )
+
+    async def update_story_profile(
+        self,
+        literary_type: str,
+        source_lang: str,
+        target_lang: str,
+        previous_profile: dict,
+        excerpt: str,
+    ) -> dict:
+        """根据新读到的段落增量更新故事档案。"""
+        import json
+        source_name = self.get_language_name(source_lang)
+        target_name = self.get_language_name(target_lang)
+        lit_type_name = self.get_literary_type_name(literary_type)
+        system_prompt = f"""你在翻译一篇{lit_type_name}时，负责维护故事结构档案，保证后文的人物、故事线和设定不散。
+
+根据已有档案和本批新段落，输出更新后的完整档案。规则：
+- 只记录文本里实际出现的**故事情节信息**，没有的栏目留空数组或空字符串
+- **严禁**写入出版方、出版社、版权页、ISBN、装帧定价、编辑推荐、书评评价、营销广告、作者简介（非书中角色）等元数据或非情节内容；若本批段落全是这类内容则保持原档案不变
+- 故事简介 synopsis：一两句话概括主线，不超过 120 字
+- 人物保留原名，并给出稳定的{target_name}译名；已有译名不要随意更换；画像 portrait 不超过 60 字
+- relationships：只写关键边，relation 简短（如「兄妹」「仇敌」）
+- 故事线 summary 不超过 80 字；设定 detail 不超过 60 字
+- 控制体量：人物最多 15 个、关系最多 20 条、故事线最多 6 条、设定最多 8 条；宁可合并也不要超长
+- 叙述记录人称、视角和语气
+- paragraph_indexes 用段落序号（从 1 开始），每项最多保留 6 个
+
+只输出紧凑 JSON（字段尽量短，确保完整可解析）：
+{{
+  "synopsis": "",
+  "characters": [{{"name": "", "aliases": [], "role": "", "portrait": "", "relations": "", "translation": "", "paragraph_indexes": []}}],
+  "relationships": [{{"from": "", "to": "", "relation": ""}}],
+  "storylines": [{{"title": "", "summary": "", "status": "", "paragraph_indexes": []}}],
+  "settings": [{{"title": "", "detail": "", "paragraph_indexes": []}}],
+  "narration": {{"point_of_view": "", "tone": "", "notes": ""}}
+}}"""
+        from app.services.story_profile import compact_profile_for_prompt, parse_profile_json
+        compact_prev = compact_profile_for_prompt(previous_profile)
+        user = (
+            f"已有档案（已压缩）：\n{json.dumps(compact_prev, ensure_ascii=False)}\n\n"
+            f"本批段落（原文为{source_name}）：\n{excerpt}"
+        )
+        # 故事档案 JSON 易膨胀，单独给足输出预算，避免截断
+        profile_max_tokens = max(self.effective_max_tokens or 0, 6144)
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+            max_tokens=profile_max_tokens,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content or ""
+        finish = getattr(response.choices[0], "finish_reason", None)
+        if finish == "length":
+            # 仍可能被截断，交给 repair 逻辑
+            pass
+        return parse_profile_json(content)
+
     async def literary_finalize(
         self,
         source_text: str,
@@ -764,11 +905,9 @@ Output only the translated text, no additional comments."""
         source_lang: str,
         target_lang: str,
         literary_type: str = "general",
+        guidance: Optional[str] = None,
     ) -> dict:
-        """
-        文学翻译 - 第四步：定稿
-        最终审校和润色，确保译文达到出版水准
-        """
+        """文学翻译 - 第四步：定稿。最终审校和润色，确保译文达到出版水准。"""
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
         
@@ -860,16 +999,15 @@ Output only the translated text, no additional comments."""
 **重要：final_translation 中必须保持与原文相同的段落数量和段落划分，段落之间用两个换行符（\\n\\n）分隔。**"""
 
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": self._apply_story_guidance(system_prompt, guidance)},
             {"role": "user", "content": f"【完整原文】({source_name}):\n{source_text}\n\n【待定稿译文（分段翻译后合并）】({target_name}):\n{revised_translation}\n\n请从全篇角度进行最终定稿，统一风格和用词，保持段落结构不变。"}
         ]
         
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=0.3,
-            max_tokens=self.effective_max_tokens,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            **self._sampling_kwargs(temperature=0.3),
         )
         
         import json
@@ -894,6 +1032,8 @@ Output only the translated text, no additional comments."""
         target_lang: str,
         literary_type: str = "general",
         reference_content: Optional[str] = None,
+        guidance: Optional[str] = None,
+        neighbor_context: Optional[str] = None,
     ) -> dict:
         """
         完整的四步文学翻译流程 - 用于单个段落
@@ -901,24 +1041,29 @@ Output only the translated text, no additional comments."""
         """
         # 第一步：翻译
         step1 = await self.literary_translate(
-            paragraph, source_lang, target_lang, literary_type, reference_content
+            paragraph, source_lang, target_lang, literary_type, reference_content,
+            guidance=guidance,
+            neighbor_context=neighbor_context,
         )
         
         # 第二步：校验
         step2_result = await self.literary_verify(
-            paragraph, step1, source_lang, target_lang, literary_type
+            paragraph, step1, source_lang, target_lang, literary_type,
+            guidance=guidance,
         )
         step2 = step2_result.get("verified_translation", step1)
         
         # 第三步：润色
         step3_result = await self.literary_revise(
-            paragraph, step2, step2_result, source_lang, target_lang, literary_type
+            paragraph, step2, step2_result, source_lang, target_lang, literary_type,
+            guidance=guidance,
         )
         step3 = step3_result.get("revised_translation", step2)
         
         # 第四步：定稿
         step4_result = await self.literary_finalize(
-            paragraph, step3, source_lang, target_lang, literary_type
+            paragraph, step3, source_lang, target_lang, literary_type,
+            guidance=guidance,
         )
         step4 = step4_result.get("final_translation", step3)
         
@@ -1004,9 +1149,8 @@ Output only the translated text, no additional comments."""
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=0.3,
-            max_tokens=self.effective_max_tokens,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            **self._sampling_kwargs(temperature=0.3),
         )
 
         import json

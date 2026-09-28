@@ -91,8 +91,8 @@ services:
     container_name: ai-translator-frontend
     restart: unless-stopped
     environment:
-      # 指向 Docker 后端端口 8002
-      - VITE_API_URL=http://localhost:8002
+      # 容器内 Vite 代理走 Docker 网络服务名
+      - VITE_API_PROXY_TARGET=http://ai-translator-backend:8000
     ports:
       # 映射到 8081，避免与本地 5173 和 writer 8080 冲突
       - "8081:5173"

@@ -3,8 +3,9 @@
 支持全文翻译、四步翻译流程、RAG参考、对照编辑
 """
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query
+from sqlalchemy import func
+from sqlalchemy.orm import Session, defer, load_only, noload
 from sqlalchemy.exc import OperationalError
 from typing import List, Optional, AsyncGenerator
 import json
@@ -18,8 +19,8 @@ import traceback
 from app.database import get_db, SessionLocal
 from app.schemas.schemas import (
     LiteraryTranslationCreate, LiteraryTranslationResponse,
-    LiteraryTranslationListItem, LiteraryParagraphResponse,
-    ParagraphUpdateRequest, LiteraryTranslationUpdate,
+    LiteraryTranslationListItem, LiteraryParagraphResponse, LiteraryParagraphPage,
+    ParagraphUpdateRequest, LiteraryTranslationUpdate, StoryProfileUpdate,
     ReferenceDocumentCreate, ReferenceDocumentResponse,
     ReferenceDocumentListItem, ReferenceDocumentUpdate,
     WorkflowStepResponse, LiteraryTranslationWorkflowResponse,
@@ -33,8 +34,46 @@ from app.models.models import (
     ProfessionalTerm, TranslationTermSummary
 )
 from app.core.ai_client import get_ai_client
+from app.services.story_profile import (
+    STORY_BATCH,
+    format_digest,
+    is_story_type,
+    neighbor_note,
+    normalize_profile,
+    regenerate_story_profile,
+    safe_refresh_story_profile,
+    save_profile,
+)
+from app.services.style_agent_service import StyleAgentService
 
 router = APIRouter(prefix="/api/literary", tags=["literary-translation"])
+
+
+def build_prompt_guidance(
+    translation: LiteraryTranslation,
+    db: Session,
+    *,
+    include_story: bool = True,
+) -> str:
+    """翻译风格 + 故事档案，注入各步翻译 prompt。"""
+    parts: List[str] = []
+    style = StyleAgentService.resolve_style_block(
+        db, getattr(translation, "style_agent_id", None), use_default=True
+    )
+    if style:
+        parts.append(style)
+    if include_story and is_story_type(translation.literary_type):
+        story = format_digest(translation.story_profile)
+        if story:
+            parts.append(story)
+    return "\n\n".join(parts)
+
+
+def _validate_style_agent_id(db: Session, style_agent_id: Optional[int]) -> None:
+    if style_agent_id is None:
+        return
+    if not StyleAgentService.get_agent(db, style_agent_id):
+        raise HTTPException(status_code=400, detail=f"文风智能体不存在: {style_agent_id}")
 
 class WorkflowCancelled(Exception):
     pass
@@ -267,6 +306,7 @@ async def create_literary_translation(
     db: Session = Depends(get_db)
 ):
     """创建文学翻译任务（大文本自动智能分段）"""
+    _validate_style_agent_id(db, request.style_agent_id)
     translation = LiteraryTranslation(
         title=request.title,
         source_text=request.source_text,
@@ -275,6 +315,7 @@ async def create_literary_translation(
         literary_type=request.literary_type.value if hasattr(request.literary_type, 'value') else request.literary_type,
         reference_document_ids=request.reference_document_ids or [],
         user_requirements=request.user_requirements,
+        style_agent_id=request.style_agent_id,
         status=LiteraryTranslationStatus.PENDING,
         current_step=1
     )
@@ -306,7 +347,23 @@ async def list_literary_translations(
 ):
     """获取文学翻译任务列表"""
     try:
-        query = db.query(LiteraryTranslation)
+        query = db.query(LiteraryTranslation).options(
+            noload(LiteraryTranslation.paragraphs),
+            load_only(
+                LiteraryTranslation.id,
+                LiteraryTranslation.title,
+                LiteraryTranslation.status,
+                LiteraryTranslation.current_step,
+                LiteraryTranslation.error_message,
+                LiteraryTranslation.source_lang,
+                LiteraryTranslation.target_lang,
+                LiteraryTranslation.literary_type,
+                LiteraryTranslation.beauty_sound_score,
+                LiteraryTranslation.beauty_word_score,
+                LiteraryTranslation.beauty_meaning_score,
+                LiteraryTranslation.created_at,
+            ),
+        )
         if status:
             query = query.filter(LiteraryTranslation.status == status)
         query = query.order_by(LiteraryTranslation.created_at.desc())
@@ -321,21 +378,86 @@ async def list_literary_translations(
         raise
 
 
+_HEAVY_TEXT_COLUMNS = (
+    LiteraryTranslation.source_text,
+    LiteraryTranslation.step1_translation,
+    LiteraryTranslation.step2_verification,
+    LiteraryTranslation.step3_revision,
+    LiteraryTranslation.step4_finalization,
+    LiteraryTranslation.final_translation,
+)
+
+
 @router.get("/translations/{translation_id}", response_model=LiteraryTranslationResponse)
 async def get_literary_translation(
     translation_id: int,
     include_paragraphs: bool = True,
+    include_source: bool = True,
     db: Session = Depends(get_db)
 ):
-    """获取文学翻译任务详情"""
-    translation = db.query(LiteraryTranslation).filter(
+    """获取文学翻译任务详情。浏览长文时传 include_paragraphs=false&include_source=false，再分页拉段落。"""
+    options = []
+    if not include_paragraphs:
+        options.append(noload(LiteraryTranslation.paragraphs))
+    if not include_source:
+        options.extend(defer(column) for column in _HEAVY_TEXT_COLUMNS)
+
+    translation = db.query(LiteraryTranslation).options(*options).filter(
         LiteraryTranslation.id == translation_id
     ).first()
-    
+
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
-    
-    return translation
+
+    paragraph_total = db.query(func.count(LiteraryParagraph.id)).filter(
+        LiteraryParagraph.translation_id == translation_id
+    ).scalar() or 0
+
+    if include_source:
+        flags = {
+            "has_step2": bool(translation.step2_verification),
+            "has_step3": bool(translation.step3_revision),
+            "has_step4": bool(translation.step4_finalization),
+        }
+    else:
+        row = db.query(
+            LiteraryTranslation.step2_verification.isnot(None),
+            LiteraryTranslation.step3_revision.isnot(None),
+            LiteraryTranslation.step4_finalization.isnot(None),
+        ).filter(LiteraryTranslation.id == translation_id).one()
+        flags = {"has_step2": bool(row[0]), "has_step3": bool(row[1]), "has_step4": bool(row[2])}
+
+    return LiteraryTranslationResponse(
+        id=translation.id,
+        title=translation.title,
+        source_text=translation.source_text if include_source else "",
+        step1_translation=translation.step1_translation if include_source else None,
+        step2_verification=translation.step2_verification if include_source else None,
+        step3_revision=translation.step3_revision if include_source else None,
+        step4_finalization=translation.step4_finalization if include_source else None,
+        final_translation=translation.final_translation if include_source else None,
+        current_step=translation.current_step or 1,
+        status=translation.status,
+        source_lang=translation.source_lang,
+        target_lang=translation.target_lang,
+        literary_type=translation.literary_type,
+        beauty_sound_score=translation.beauty_sound_score,
+        beauty_word_score=translation.beauty_word_score,
+        beauty_meaning_score=translation.beauty_meaning_score,
+        ai_provider=translation.ai_provider,
+        ai_model=translation.ai_model,
+        reference_document_ids=translation.reference_document_ids or [],
+        user_requirements=translation.user_requirements,
+        created_at=translation.created_at,
+        updated_at=translation.updated_at,
+        completed_at=translation.completed_at,
+        paragraphs=list(translation.paragraphs) if include_paragraphs else None,
+        error_message=translation.error_message,
+        has_step2=flags["has_step2"],
+        has_step3=flags["has_step3"],
+        has_step4=flags["has_step4"],
+        paragraph_total=paragraph_total,
+    )
 
 
 @router.put("/translations/{translation_id}", response_model=LiteraryTranslationResponse)
@@ -363,6 +485,12 @@ async def update_literary_translation(
         if request.status not in allowed:
             raise HTTPException(status_code=400, detail=f"status must be one of: {allowed}")
         translation.status = request.status
+    fields_set = getattr(request, "model_fields_set", None) or set()
+    if "style_agent_id" in fields_set:
+        _validate_style_agent_id(db, request.style_agent_id)
+        translation.style_agent_id = request.style_agent_id
+    if request.user_requirements is not None:
+        translation.user_requirements = request.user_requirements
 
     db.commit()
     db.refresh(translation)
@@ -403,8 +531,13 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
     reference_content = get_reference_and_requirements(translation, db)
+    story_mode = is_story_type(translation.literary_type)
+    if story_mode and paragraphs:
+        await safe_refresh_story_profile(client, translation, paragraphs[:STORY_BATCH], db, include_translation=False)
+        db.refresh(translation)
     full_step1 = []
-    for para in paragraphs:
+    pending_story = []
+    for index, para in enumerate(paragraphs):
         if translation_id in CANCELLED_TRANSLATIONS:
             translation.status = LiteraryTranslationStatus.FAILED
             translation.error_message = "Cancelled by user"
@@ -412,14 +545,27 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
             raise WorkflowCancelled()
         source_text = _sanitize_text_for_api(para.source_text or "")
         ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
+        guidance = build_prompt_guidance(translation, db, include_story=story_mode)
+        neighbor = neighbor_note(paragraphs, index) if story_mode else ""
         result = await client.literary_translate(
             source_text, translation.source_lang, translation.target_lang,
-            translation.literary_type, ref_safe
+            translation.literary_type, ref_safe,
+            guidance=guidance or None,
+            neighbor_context=neighbor or None,
         )
         para.step1_translation = result
         para.translated_text = result
         full_step1.append(result)
         db.commit()
+        if story_mode:
+            pending_story.append(para)
+            if len(pending_story) >= STORY_BATCH:
+                await safe_refresh_story_profile(client, translation, pending_story, db, include_translation=True)
+                db.refresh(translation)
+                pending_story = []
+    if story_mode and pending_story:
+        await safe_refresh_story_profile(client, translation, pending_story, db, include_translation=True)
+        db.refresh(translation)
     translation.step1_translation = "\n\n".join(full_step1)
     translation.current_step = 2
     translation.status = LiteraryTranslationStatus.VERIFYING
@@ -437,6 +583,7 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
     ).order_by(LiteraryParagraph.paragraph_index).all()
     full_step2 = []
     total_sound, total_word, total_meaning = 0, 0, 0
+    guidance = build_prompt_guidance(translation, db, include_story=True)
     for para in paragraphs:
         if translation_id in CANCELLED_TRANSLATIONS:
             translation.status = LiteraryTranslationStatus.FAILED
@@ -445,7 +592,8 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
             raise WorkflowCancelled()
         result = await client.literary_verify(
             para.source_text, para.step1_translation or para.translated_text or "",
-            translation.source_lang, translation.target_lang, translation.literary_type
+            translation.source_lang, translation.target_lang, translation.literary_type,
+            guidance=guidance or None,
         )
         verified = result.get("verified_translation", para.step1_translation)
         para.step2_verification = verified
@@ -478,6 +626,7 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
     full_step3 = []
+    guidance = build_prompt_guidance(translation, db, include_story=True)
     for para in paragraphs:
         if translation_id in CANCELLED_TRANSLATIONS:
             translation.status = LiteraryTranslationStatus.FAILED
@@ -492,7 +641,8 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
         }
         result = await client.literary_revise(
             para.source_text, para.step2_verification or para.translated_text or "",
-            verification_analysis, translation.source_lang, translation.target_lang, translation.literary_type
+            verification_analysis, translation.source_lang, translation.target_lang, translation.literary_type,
+            guidance=guidance or None,
         )
         revised = result.get("revised_translation", para.step2_verification)
         para.step3_revision = revised
@@ -533,7 +683,8 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
         )
         result = await client.literary_finalize(
             full_source, full_revised,
-            translation.source_lang, translation.target_lang, translation.literary_type
+            translation.source_lang, translation.target_lang, translation.literary_type,
+            guidance=build_prompt_guidance(translation, db, include_story=True) or None,
         )
         finalized_full = result.get("final_translation", full_revised)
         finalized_parts = finalized_full.split(PARA_SEP)
@@ -573,7 +724,8 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
             )
             result = await client.literary_finalize(
                 batch_source, batch_revised,
-                translation.source_lang, translation.target_lang, translation.literary_type
+                translation.source_lang, translation.target_lang, translation.literary_type,
+                guidance=build_prompt_guidance(translation, db, include_story=True) or None,
             )
             finalized_text = result.get("final_translation", batch_revised)
             finalized_parts = finalized_text.split(PARA_SEP)
@@ -806,6 +958,81 @@ async def start_batch_workflow(
     return {"message": f"已加入队列 {len(valid_ids)} 个任务", "translation_ids": valid_ids}
 
 
+@router.get("/translations/{translation_id}/story")
+async def get_story_profile(
+    translation_id: int,
+    db: Session = Depends(get_db)
+):
+    """获取故事结构档案"""
+    translation = db.query(LiteraryTranslation).options(
+        noload(LiteraryTranslation.paragraphs),
+        *[defer(column) for column in _HEAVY_TEXT_COLUMNS],
+    ).filter(LiteraryTranslation.id == translation_id).first()
+    if not translation:
+        raise HTTPException(status_code=404, detail="Translation not found")
+    return {
+        "translation_id": translation.id,
+        "title": translation.title,
+        "literary_type": translation.literary_type,
+        "status": translation.status,
+        "applicable": is_story_type(translation.literary_type),
+        "profile": normalize_profile(translation.story_profile),
+    }
+
+
+@router.put("/translations/{translation_id}/story")
+async def update_story_profile_endpoint(
+    translation_id: int,
+    request: StoryProfileUpdate,
+    db: Session = Depends(get_db)
+):
+    """保存用户修订后的故事结构档案。已确认译名会写入词库。"""
+    translation = db.query(LiteraryTranslation).options(
+        noload(LiteraryTranslation.paragraphs),
+        *[defer(column) for column in _HEAVY_TEXT_COLUMNS],
+    ).filter(LiteraryTranslation.id == translation_id).first()
+    if not translation:
+        raise HTTPException(status_code=404, detail="Translation not found")
+    if not is_story_type(translation.literary_type):
+        raise HTTPException(status_code=400, detail="当前文本类型不整理故事结构")
+    profile = save_profile(translation, request.profile, db)
+    return {"profile": profile}
+
+
+@router.post("/translations/{translation_id}/story/regenerate")
+async def regenerate_story_profile_endpoint(
+    translation_id: int,
+    db: Session = Depends(get_db),
+):
+    """根据全部段落原文重新生成故事结构（保留已确认译名）。"""
+    translation = db.query(LiteraryTranslation).filter(
+        LiteraryTranslation.id == translation_id
+    ).first()
+    if not translation:
+        raise HTTPException(status_code=404, detail="Translation not found")
+    if not is_story_type(translation.literary_type):
+        raise HTTPException(status_code=400, detail="当前文本类型不整理故事结构")
+
+    client = get_ai_client()
+    try:
+        profile = await regenerate_story_profile(
+            client, translation, db, include_translation=False
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重新生成失败: {e}") from e
+
+    return {
+        "translation_id": translation.id,
+        "title": translation.title,
+        "literary_type": translation.literary_type,
+        "status": translation.status,
+        "applicable": True,
+        "profile": profile,
+    }
+
+
 @router.get("/translations/{translation_id}/workflow", response_model=LiteraryTranslationWorkflowResponse)
 async def get_workflow_status(
     translation_id: int,
@@ -870,17 +1097,28 @@ async def get_workflow_status(
 # 段落管理
 # ============================================================
 
-@router.get("/translations/{translation_id}/paragraphs", response_model=List[LiteraryParagraphResponse])
+@router.get("/translations/{translation_id}/paragraphs", response_model=LiteraryParagraphPage)
 async def get_paragraphs(
     translation_id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(30, ge=1, le=200),
     db: Session = Depends(get_db)
 ):
-    """获取所有段落"""
-    paragraphs = db.query(LiteraryParagraph).filter(
+    """分页获取段落，避免长文本一次加载全部正文"""
+    exists = db.query(LiteraryTranslation.id).filter(
+        LiteraryTranslation.id == translation_id
+    ).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Translation not found")
+
+    total = db.query(func.count(LiteraryParagraph.id)).filter(
         LiteraryParagraph.translation_id == translation_id
-    ).order_by(LiteraryParagraph.paragraph_index).all()
-    
-    return paragraphs
+    ).scalar() or 0
+    items = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation_id
+    ).order_by(LiteraryParagraph.paragraph_index).offset(skip).limit(limit).all()
+
+    return LiteraryParagraphPage(items=items, total=total, skip=skip, limit=limit)
 
 
 @router.put("/paragraphs/{paragraph_id}", response_model=LiteraryParagraphResponse)
@@ -919,6 +1157,87 @@ async def update_paragraph(
         ])
         db.commit()
     
+    return paragraph
+
+
+@router.post("/paragraphs/{paragraph_id}/retranslate", response_model=LiteraryParagraphResponse)
+async def retranslate_paragraph(
+    paragraph_id: int,
+    db: Session = Depends(get_db),
+):
+    """对单个段落重新跑完整四步翻译（初译→校验→润色→定稿）"""
+    paragraph = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.id == paragraph_id
+    ).first()
+    if not paragraph:
+        raise HTTPException(status_code=404, detail="Paragraph not found")
+
+    translation = db.query(LiteraryTranslation).filter(
+        LiteraryTranslation.id == paragraph.translation_id
+    ).first()
+    if not translation:
+        raise HTTPException(status_code=404, detail="Translation not found")
+
+    source_text = _sanitize_text_for_api(paragraph.source_text or "")
+    if not source_text.strip():
+        raise HTTPException(status_code=400, detail="该段原文为空，无法重译")
+
+    all_paras = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation.id
+    ).order_by(LiteraryParagraph.paragraph_index).all()
+    index = next((i for i, p in enumerate(all_paras) if p.id == paragraph.id), 0)
+
+    client = get_ai_client()
+    reference_content = get_reference_and_requirements(translation, db)
+    ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
+    story_mode = is_story_type(translation.literary_type)
+    guidance = build_prompt_guidance(translation, db, include_story=story_mode)
+    neighbor = neighbor_note(all_paras, index) if story_mode else ""
+
+    try:
+        result = await client.literary_translate_paragraph(
+            paragraph=source_text,
+            source_lang=translation.source_lang,
+            target_lang=translation.target_lang,
+            literary_type=translation.literary_type,
+            reference_content=ref_safe or None,
+            guidance=guidance or None,
+            neighbor_context=neighbor or None,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重译失败: {e}") from e
+
+    paragraph.step1_translation = result["step1_translation"]
+    paragraph.step2_verification = result["step2_verification"]
+    paragraph.step3_revision = result["step3_revision"]
+    paragraph.step4_finalization = result["step4_finalization"]
+    paragraph.translated_text = result["step4_finalization"]
+    paragraph.user_edited_text = None
+    paragraph.is_edited = False
+    beauty_scores = result.get("beauty_scores") or {}
+    paragraph.beauty_sound_score = beauty_scores.get("sound", 7.0)
+    paragraph.beauty_word_score = beauty_scores.get("word", 7.0)
+    paragraph.beauty_meaning_score = beauty_scores.get("meaning", 7.0)
+    db.commit()
+
+    # 刷新全文聚合字段
+    all_paras = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation.id
+    ).order_by(LiteraryParagraph.paragraph_index).all()
+    translation.step1_translation = "\n\n".join(p.step1_translation or "" for p in all_paras)
+    translation.step2_verification = "\n\n".join(p.step2_verification or "" for p in all_paras)
+    translation.step3_revision = "\n\n".join(p.step3_revision or "" for p in all_paras)
+    translation.step4_finalization = "\n\n".join(p.step4_finalization or "" for p in all_paras)
+    translation.final_translation = "\n\n".join(
+        p.user_edited_text or p.translated_text or "" for p in all_paras
+    )
+    scored = [p for p in all_paras if p.beauty_sound_score is not None]
+    if scored:
+        translation.beauty_sound_score = sum(p.beauty_sound_score or 0 for p in scored) / len(scored)
+        translation.beauty_word_score = sum(p.beauty_word_score or 0 for p in scored) / len(scored)
+        translation.beauty_meaning_score = sum(p.beauty_meaning_score or 0 for p in scored) / len(scored)
+    db.commit()
+    db.refresh(paragraph)
     return paragraph
 
 
@@ -1201,8 +1520,15 @@ async def export_translation(
         request.include_source
     )
 
+    raw_name = (translation.title or "").strip() or f"literary_translation_{translation_id}"
+    # Windows / 通用文件名非法字符
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")
+    safe_name = re.sub(r"\s+", " ", safe_name) or f"literary_translation_{translation_id}"
+    if len(safe_name) > 120:
+        safe_name = safe_name[:120].rstrip(" .")
+
     return {
-        "filename": f"literary_translation_{translation_id}.{format_ext}",
+        "filename": f"{safe_name}.{format_ext}",
         "content": content,
         "format": request.format,
         "mime_type": format_mime_types[format_ext]
@@ -1221,12 +1547,23 @@ async def list_professional_terms(
     target_lang: Optional[str] = None,
     keyword: Optional[str] = None,
     is_verified: Optional[bool] = None,
+    translation_id: Optional[int] = None,
+    scope: Optional[str] = Query(None, description="document=小词库, global=大词库"),
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db)
 ):
-    """获取专业词汇列表"""
+    """获取专业词汇。scope=document 需 translation_id；scope=global 为系统大词库。"""
     query = db.query(ProfessionalTerm)
+
+    if scope == "document":
+        if not translation_id:
+            raise HTTPException(status_code=400, detail="小词库需要 translation_id")
+        query = query.filter(ProfessionalTerm.translation_id == translation_id)
+    elif scope == "global":
+        query = query.filter(ProfessionalTerm.translation_id.is_(None))
+    elif translation_id is not None:
+        query = query.filter(ProfessionalTerm.translation_id == translation_id)
 
     if literary_type:
         query = query.filter(ProfessionalTerm.literary_type == literary_type)
@@ -1253,17 +1590,21 @@ async def create_professional_term(
     request: ProfessionalTermCreate,
     db: Session = Depends(get_db)
 ):
-    """创建专业词汇"""
-    # 检查是否已存在相同词汇
-    existing = db.query(ProfessionalTerm).filter(
+    """创建专业词汇。带 translation_id 写入小词库，否则写入大词库。"""
+    literary_type = request.literary_type.value if hasattr(request.literary_type, 'value') else request.literary_type
+    query = db.query(ProfessionalTerm).filter(
         ProfessionalTerm.source_term == request.source_term,
-        ProfessionalTerm.literary_type == request.literary_type,
+        ProfessionalTerm.literary_type == literary_type,
         ProfessionalTerm.source_lang == request.source_lang,
-        ProfessionalTerm.target_lang == request.target_lang
-    ).first()
+        ProfessionalTerm.target_lang == request.target_lang,
+    )
+    if request.translation_id is not None:
+        query = query.filter(ProfessionalTerm.translation_id == request.translation_id)
+    else:
+        query = query.filter(ProfessionalTerm.translation_id.is_(None))
+    existing = query.first()
 
     if existing:
-        # 更新现有词汇
         existing.target_term = request.target_term
         existing.category = request.category
         existing.description = request.description
@@ -1272,15 +1613,22 @@ async def create_professional_term(
         db.refresh(existing)
         return existing
 
-    # 创建新词汇
+    if request.translation_id is not None:
+        exists = db.query(LiteraryTranslation.id).filter(
+            LiteraryTranslation.id == request.translation_id
+        ).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Translation not found")
+
     term = ProfessionalTerm(
         source_term=request.source_term,
         target_term=request.target_term,
-        literary_type=request.literary_type.value if hasattr(request.literary_type, 'value') else request.literary_type,
+        literary_type=literary_type,
         category=request.category,
         source_lang=request.source_lang,
         target_lang=request.target_lang,
         description=request.description,
+        translation_id=request.translation_id,
         usage_count=1,
         is_verified=True
     )
@@ -1309,10 +1657,46 @@ async def update_professional_term(
         term.description = request.description
     if request.is_verified is not None:
         term.is_verified = request.is_verified
+    if "translation_id" in request.model_fields_set:
+        term.translation_id = request.translation_id
 
     db.commit()
     db.refresh(term)
     return term
+
+
+@router.post("/terms/{term_id}/promote")
+async def promote_term_to_global(
+    term_id: int,
+    db: Session = Depends(get_db)
+):
+    """将小词库词汇提升到系统大词库"""
+    term = db.query(ProfessionalTerm).filter(ProfessionalTerm.id == term_id).first()
+    if not term:
+        raise HTTPException(status_code=404, detail="Term not found")
+    if term.translation_id is None:
+        return {"message": "已在大词库", "term_id": term.id}
+
+    conflict = db.query(ProfessionalTerm).filter(
+        ProfessionalTerm.source_term == term.source_term,
+        ProfessionalTerm.literary_type == term.literary_type,
+        ProfessionalTerm.source_lang == term.source_lang,
+        ProfessionalTerm.target_lang == term.target_lang,
+        ProfessionalTerm.translation_id.is_(None),
+        ProfessionalTerm.id != term.id,
+    ).first()
+    if conflict:
+        conflict.target_term = term.target_term
+        conflict.category = term.category or conflict.category
+        conflict.description = term.description or conflict.description
+        conflict.usage_count += term.usage_count or 1
+        db.delete(term)
+        db.commit()
+        return {"message": "已合并到大词库", "term_id": conflict.id}
+
+    term.translation_id = None
+    db.commit()
+    return {"message": "已提升到大词库", "term_id": term.id}
 
 
 @router.delete("/terms/{term_id}")
@@ -1333,10 +1717,16 @@ async def delete_professional_term(
 @router.get("/terms/categories")
 async def get_term_categories(
     literary_type: Optional[str] = None,
+    translation_id: Optional[int] = None,
+    scope: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """获取词汇分类列表"""
     query = db.query(ProfessionalTerm.category).distinct()
+    if scope == "document" and translation_id:
+        query = query.filter(ProfessionalTerm.translation_id == translation_id)
+    elif scope == "global":
+        query = query.filter(ProfessionalTerm.translation_id.is_(None))
     if literary_type:
         query = query.filter(ProfessionalTerm.literary_type == literary_type)
 
@@ -1715,6 +2105,7 @@ async def upload_and_translate_file(
     literary_type: str = Form("general"),
     reference_document_ids: Optional[str] = Form(None),
     user_requirements: Optional[str] = Form(None),
+    style_agent_id: Optional[int] = Form(None),
     auto_run: bool = Form(True, description="是否自动执行四步流程"),
     db: Session = Depends(get_db)
 ):
@@ -1736,6 +2127,7 @@ async def upload_and_translate_file(
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="文件内容为空")
     ref_ids = json.loads(reference_document_ids) if reference_document_ids else []
+    _validate_style_agent_id(db, style_agent_id)
     translation = LiteraryTranslation(
         title=title or file.filename,
         source_text=text_content,
@@ -1744,6 +2136,7 @@ async def upload_and_translate_file(
         literary_type=literary_type,
         reference_document_ids=ref_ids,
         user_requirements=user_requirements.strip() if user_requirements else None,
+        style_agent_id=style_agent_id,
         status=LiteraryTranslationStatus.PENDING,
         current_step=1
     )
@@ -1789,6 +2182,7 @@ async def upload_and_translate_batch(
     literary_type: str = Form("general"),
     reference_document_ids: Optional[str] = Form(None),
     user_requirements: Optional[str] = Form(None),
+    style_agent_id: Optional[int] = Form(None),
     auto_run: bool = Form(True, description="是否对每个任务自动执行四步流程"),
     db: Session = Depends(get_db)
 ):
@@ -1801,6 +2195,7 @@ async def upload_and_translate_batch(
     results = []
     ref_ids = json.loads(reference_document_ids) if reference_document_ids else []
     req_text = user_requirements.strip() if user_requirements else None
+    _validate_style_agent_id(db, style_agent_id)
 
     for file in files:
         file_extension = file.filename.split(".")[-1].lower() if "." in file.filename else ""
@@ -1860,6 +2255,7 @@ async def upload_and_translate_batch(
             literary_type=literary_type,
             reference_document_ids=ref_ids,
             user_requirements=req_text,
+            style_agent_id=style_agent_id,
             status=LiteraryTranslationStatus.PENDING,
             current_step=1,
         )
@@ -1942,14 +2338,8 @@ async def translate_all_chunks(
     
     client = get_ai_client()
     
-    # 获取参考文档内容
-    reference_content = ""
-    if translation.reference_document_ids:
-        docs = db.query(ReferenceDocument).filter(
-            ReferenceDocument.id.in_(translation.reference_document_ids),
-            ReferenceDocument.is_active == True
-        ).all()
-        reference_content = "\n\n".join([f"=== {d.name} ===\n{d.content}" for d in docs])
+    reference_content = get_reference_and_requirements(translation, db)
+    guidance = build_prompt_guidance(translation, db, include_story=True)
     
     # 批量翻译所有段落
     total = len(paragraphs)
@@ -1962,7 +2352,8 @@ async def translate_all_chunks(
                 source_lang=translation.source_lang,
                 target_lang=translation.target_lang,
                 literary_type=translation.literary_type,
-                reference_content=reference_content if reference_content else None
+                reference_content=reference_content if reference_content else None,
+                guidance=guidance or None,
             )
             
             # 保存四步翻译结果

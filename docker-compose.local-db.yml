@@ -87,7 +87,7 @@ services:
     container_name: ai-translator-frontend
     restart: unless-stopped
     environment:
-      - VITE_API_URL=http://localhost:8002
+      - VITE_API_PROXY_TARGET=http://ai-translator-backend:8000
     ports:
       - "8081:5173"
     depends_on:

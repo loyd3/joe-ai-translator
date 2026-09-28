@@ -37,9 +37,13 @@
 
       <div class="toolbar-right">
         <el-button-group>
-          <el-button size="default" @click="showTermLibrary = true">
+          <el-button size="default" @click="goToTermLibrary">
             <el-icon><Collection /></el-icon>
             词库
+          </el-button>
+          <el-button size="default" @click="goToStylePage">
+            <el-icon><Brush /></el-icon>
+            翻译风格
           </el-button>
           <el-button size="default" @click="showHistory = true">
             <el-icon><Clock /></el-icon>
@@ -69,6 +73,15 @@
           </div>
         </div>
 
+        <div class="requirements-row">
+          <span class="label">翻译风格</span>
+          <StyleAgentPicker
+            v-model="selectedStyleAgentId"
+            :label="''"
+            default-label="系统默认"
+            @manage="goToStylePage"
+          />
+        </div>
         <div class="requirements-row">
           <span class="label">翻译需求（可选）</span>
           <el-input
@@ -287,20 +300,19 @@
       </div>
     </div>
 
-    <!-- 专业词库侧边栏 -->
-    <el-drawer
-      v-model="showTermLibrary"
-      title="专业词库"
-      size="450px"
-      destroy-on-close
-    >
-      <TermLibraryPanel
-        ref="termPanelRef"
+    <div v-if="showTermsPanel" class="terms-overlay">
+      <TermLibraryView
+        :translation-id="currentTask?.id"
         :literary-type="selectedLiteraryType"
         :source-lang="currentTask?.source_lang"
         :target-lang="currentTask?.target_lang"
+        @back="showTermsPanel = false"
       />
-    </el-drawer>
+    </div>
+
+    <div v-if="showStylePanel" class="terms-overlay">
+      <StyleAgentsView @back="showStylePanel = false" />
+    </div>
 
     <!-- 历史记录侧边栏 -->
     <el-drawer
@@ -398,9 +410,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Document, Memo, Monitor, DataLine, Grid, Upload, Edit, Delete } from '@element-plus/icons-vue'
+import { Document, Memo, Monitor, DataLine, Grid, Upload, Edit, Delete, Collection, Clock, Brush } from '@element-plus/icons-vue'
 import { literaryApi, translateApi } from '@/api'
-import TermLibraryPanel from './TermLibraryPanel.vue'
+import TermLibraryView from '@/views/TermLibraryView.vue'
+import StyleAgentsView from '@/views/StyleAgentsView.vue'
+import StyleAgentPicker from '@/components/StyleAgentPicker.vue'
 
 // 图标映射
 const iconMap: Record<string, any> = {
@@ -416,6 +430,7 @@ const languages = ref<{ code: string; name: string }[]>([])
 const inputText = ref('')
 const outputText = ref('')
 const userRequirements = ref('')
+const selectedStyleAgentId = ref<number | undefined>(undefined)
 const selectedLiteraryType = ref('general')
 const uploadRef = ref<any>(null)
 const currentTask = ref<any>(null)
@@ -425,13 +440,15 @@ const isProcessing = ref(false)
 const isEditing = ref(false)
 const isExporting = ref(false)
 const showComparison = ref(false)
-const showTermLibrary = ref(false)
+const showTermsPanel = ref(false)
+const showStylePanel = ref(false)
+const goToTermLibrary = () => { showTermsPanel.value = true }
+const goToStylePage = () => { showStylePanel.value = true }
 const showHistory = ref(false)
 const showExport = ref(false)
 const showEditTask = ref(false)
 const editingTask = ref<any>(null)
 const editForm = ref({ title: '', status: '' })
-const termPanelRef = ref<any>(null)
 const taskHistory = ref<any[]>([])
 const currentStep = ref(0)
 const displayVersion = ref(1)
@@ -543,7 +560,8 @@ const startTranslation = async () => {
       source_lang: currentTask.value?.source_lang || 'auto',
       target_lang: currentTask.value?.target_lang || 'en',
       literary_type: selectedLiteraryType.value as any,
-      user_requirements: userRequirements.value.trim() || undefined
+      user_requirements: userRequirements.value.trim() || undefined,
+      style_agent_id: selectedStyleAgentId.value,
     })
     currentTask.value = response.data
     currentStep.value = 1
@@ -574,6 +592,7 @@ const onFileSelect = async (opts: { file: File }) => {
     form.append('literary_type', selectedLiteraryType.value)
     form.append('auto_run', 'true')
     if (userRequirements.value.trim()) form.append('user_requirements', userRequirements.value.trim())
+    if (selectedStyleAgentId.value != null) form.append('style_agent_id', String(selectedStyleAgentId.value))
     const res = await literaryApi.uploadAndTranslate(form)
     const id = res.data?.translation_id
     if (!id) throw new Error('未返回任务 ID')
@@ -835,7 +854,7 @@ const getStatusText = (status: string) => {
 
 const getScoreColor = (score: number) => {
   if (score >= 80) return '#67c23a'
-  if (score >= 60) return '#409eff'
+  if (score >= 60) return '#3e4bc4'
   if (score >= 40) return '#e6a23c'
   return '#f56c6c'
 }
@@ -852,15 +871,16 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .literary-translator {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: #f5f7fa;
+  background: transparent;
 
   .top-toolbar {
-    background: #fff;
+    background: var(--ins-surface);
     padding: 12px 24px;
-    border-bottom: 1px solid #e4e7ed;
+    border-bottom: 1px solid var(--ins-line);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1088,7 +1108,7 @@ onUnmounted(() => {
               justify-content: space-between;
 
               .edit-hint {
-                color: #409eff;
+                color: #3e4bc4;
               }
             }
 
@@ -1125,13 +1145,13 @@ onUnmounted(() => {
       transition: all 0.2s;
 
       &:hover {
-        border-color: #409eff;
+        border-color: #3e4bc4;
         background: #f5f7fa;
       }
 
       &.active {
-        border-color: #409eff;
-        background: #e8f4ff;
+        border-color: #3e4bc4;
+        background: var(--el-color-primary-light-9);
       }
 
       .format-name {
@@ -1183,5 +1203,12 @@ onUnmounted(() => {
       flex-shrink: 0;
     }
   }
+}
+
+.terms-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: #f5f7fa;
 }
 </style>

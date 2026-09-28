@@ -94,12 +94,16 @@ class LiteraryTranslation(Base):
     
     # 用户翻译前指明的需求（风格、术语等）
     user_requirements = Column(Text, nullable=True, comment="用户翻译需求说明")
+
+    # 文风智能体（系统级文风库，id 对应 writing_style_agents）
+    style_agent_id = Column(Integer, nullable=True, comment="选用的文风智能体 ID")
     
     # 用户编辑的最终译文
     final_translation = Column(Text, nullable=True, comment="用户编辑后的最终译文")
     
     # 工作流失败时记录的错误原因（便于排查）
     error_message = Column(Text, nullable=True, comment="翻译流程失败时的错误信息")
+    story_profile = Column(JSON, nullable=True, comment="故事结构档案：人物、故事线、设定、叙述")
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -245,10 +249,29 @@ class AIConfig(Base):
     __tablename__ = "ai_config"
 
     id = Column(Integer, primary_key=True, default=1)
-    provider = Column(String(50), nullable=False, default="deepseek", comment="AI 提供商: openai, deepseek, siliconflow, custom")
+    provider = Column(String(50), nullable=False, default="deepseek", comment="AI 提供商")
     api_key = Column(String(500), nullable=True, comment="API Key")
     model = Column(String(200), nullable=True, comment="模型名称")
-    base_url = Column(String(500), nullable=True, comment="自定义 API 地址（custom 提供商时必填）")
+    base_url = Column(String(500), nullable=True, comment="API 地址（custom/ollama 必填，其他可覆盖）")
     temperature = Column(Float, nullable=True, comment="温度参数")
     max_tokens = Column(Integer, nullable=True, comment="最大 token 数")
+    top_p = Column(Float, nullable=True, comment="nucleus sampling top_p")
+    frequency_penalty = Column(Float, nullable=True, comment="频率惩罚")
+    presence_penalty = Column(Float, nullable=True, comment="存在惩罚")
+    timeout_seconds = Column(Integer, nullable=True, comment="请求超时秒数")
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class WritingStyleAgent(Base):
+    """系统级翻译风格（跨任务复用：贴合原文 + 译者习惯）"""
+    __tablename__ = "writing_style_agents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, comment="文风名称")
+    description = Column(Text, nullable=True, comment="一句话定位")
+    preset_key = Column(String(50), nullable=True, comment="来源预设 key")
+    config = Column(JSON, nullable=False, default=dict, comment="结构化文风配置")
+    is_default = Column(Boolean, default=False, comment="是否默认文风")
+    source = Column(String(32), default="manual", comment="preset|manual|extract")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

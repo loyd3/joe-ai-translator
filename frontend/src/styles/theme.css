@@ -1,0 +1,297 @@
+:root {
+  --ins-primary-rgb: 107, 118, 220;
+  --ins-bg: #f5f5f7;
+  --ins-bg-deep: #ececf1;
+  --ins-surface: #ffffff;
+  --ins-surface-solid: #ffffff;
+  --ins-ink: #15181d;
+  --ins-ink-2: #3a3e45;
+  --ins-muted: #6b7078;
+  --ins-line: #e3e4e8;
+  --ins-line-strong: #d5d6dc;
+  --ins-shadow: 0 2px 6px rgba(16, 18, 24, 0.04), 0 8px 24px rgba(16, 18, 24, 0.06);
+  --ins-shadow-sm: 0 1px 2px rgba(16, 18, 24, 0.05);
+  --ins-radius: 14px;
+  --ins-radius-sm: 10px;
+  --ins-radius-pill: 8px;
+  --ins-grad: linear-gradient(135deg, #6b76dc 0%, #8a93e6 100%);
+  --ins-grad-soft: rgba(107, 118, 220, 0.08);
+  --ins-cyan: #8a93e6;
+  --ins-pink: #6b76dc;
+  --ins-violet: #8a93e6;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+
+  --el-color-primary: #6b76dc;
+  --el-color-primary-rgb: 107, 118, 220;
+  --el-color-primary-light-3: #8a93e6;
+  --el-color-primary-light-5: #adb3ee;
+  --el-color-primary-light-7: #cdd1f4;
+  --el-color-primary-light-8: #e0e3f8;
+  --el-color-primary-light-9: #f0f1fb;
+  --el-color-primary-dark-2: #4e59c4;
+  --el-color-success: #3d9a78;
+  --el-color-warning: #c48a3a;
+  --el-color-danger: #c45c5c;
+  --el-color-info: #8e939a;
+  --el-border-radius-base: 10px;
+  --el-border-radius-small: 8px;
+  --el-border-radius-round: 8px;
+  --el-font-family: var(--font-sans);
+  --el-font-size-base: 15px;
+  --el-font-size-small: 13px;
+  --el-font-size-extra-small: 12px;
+  --el-text-color-primary: var(--ins-ink);
+  --el-text-color-regular: var(--ins-ink-2);
+  --el-text-color-secondary: var(--ins-muted);
+  --el-border-color: var(--ins-line-strong);
+  --el-border-color-light: var(--ins-line);
+  --el-bg-color: var(--ins-surface-solid);
+  --el-fill-color-blank: var(--ins-surface-solid);
+  --el-fill-color-light: var(--ins-bg-deep);
+  --el-box-shadow: var(--ins-shadow);
+  --el-box-shadow-light: var(--ins-shadow-sm);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--ins-ink);
+  background: var(--ins-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: #c8cad1;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover { background: #b0b3bb; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.el-button {
+  --el-button-font-weight: 600;
+  border-radius: 8px !important;
+  min-height: 36px;
+  padding: 8px 16px;
+  font-size: 14px;
+}
+.el-button--small {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+.el-button--primary {
+  background: var(--ins-grad) !important;
+  border: 0 !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(var(--ins-primary-rgb), 0.28);
+}
+.el-button--primary:hover,
+.el-button--primary:focus {
+  background: var(--el-color-primary-dark-2) !important;
+  color: #fff !important;
+}
+.el-button--primary.is-plain {
+  background: var(--ins-surface) !important;
+  color: var(--el-color-primary) !important;
+  border: 1px solid var(--el-color-primary-light-7) !important;
+  box-shadow: none;
+}
+.el-button.is-circle {
+  width: 36px !important;
+  height: 36px !important;
+  min-height: 36px;
+  border-radius: 10px !important;
+  padding: 0 !important;
+  font-size: 16px;
+}
+.el-button.is-circle .el-icon {
+  font-size: 16px;
+}
+.el-button:not(.el-button--primary):not(.el-button--danger):not(.is-link):not(.is-text) {
+  background: var(--ins-surface);
+  border-color: var(--ins-line-strong);
+  color: var(--ins-ink-2);
+}
+.el-button:not(.el-button--primary):not(.el-button--danger):not(.is-link):hover {
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  border-radius: 8px !important;
+  box-shadow: 0 0 0 1px var(--ins-line-strong) inset !important;
+  background: var(--ins-surface) !important;
+  font-size: 14px;
+  min-height: 36px;
+}
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset !important;
+}
+
+.el-dialog {
+  border-radius: 14px !important;
+  overflow: hidden;
+  background: var(--ins-surface) !important;
+  box-shadow: var(--ins-shadow) !important;
+}
+.el-dialog__header {
+  padding: 18px 22px 8px !important;
+  margin-right: 0 !important;
+}
+.el-dialog__title {
+  font-weight: 700 !important;
+  font-size: 16px !important;
+}
+.el-dialog__body { padding: 8px 22px 18px !important; font-size: 14px; }
+
+.el-radio-button__inner {
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 14px;
+}
+.el-radio-button:first-child .el-radio-button__inner {
+  border-radius: 8px 0 0 8px;
+}
+.el-radio-button:last-child .el-radio-button__inner {
+  border-radius: 0 8px 8px 0;
+}
+.el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: var(--el-color-primary);
+  border-color: var(--el-color-primary);
+  color: #fff;
+  box-shadow: none;
+}
+
+.el-tag {
+  border-radius: 6px !important;
+  font-weight: 600;
+  border: 0 !important;
+  font-size: 12px;
+  height: 22px;
+  padding: 0 8px;
+}
+.el-tag--info {
+  --el-tag-bg-color: #ececf1;
+  --el-tag-text-color: #3a3e45;
+}
+.el-tag--success {
+  --el-tag-bg-color: #e3f4ec;
+  --el-tag-text-color: #2d7a58;
+}
+.el-tag--warning {
+  --el-tag-bg-color: #f8ecd8;
+  --el-tag-text-color: #9a6a28;
+}
+.el-tag--danger {
+  --el-tag-bg-color: #f8e3e3;
+  --el-tag-text-color: #a34444;
+}
+.el-tag--primary,
+.el-tag--info.el-tag--plain {
+  --el-tag-bg-color: var(--el-color-primary-light-9);
+  --el-tag-text-color: var(--el-color-primary);
+}
+
+.el-tabs__item {
+  font-size: 14px !important;
+}
+.el-tabs__active-bar {
+  background: var(--el-color-primary) !important;
+  height: 2px !important;
+  border-radius: 2px;
+}
+.el-tabs__item.is-active {
+  color: var(--el-color-primary) !important;
+  font-weight: 600;
+}
+.el-tabs__item:hover { color: var(--el-color-primary); }
+.el-tabs__nav-wrap::after { background: var(--ins-line) !important; }
+
+.el-empty__description p { color: var(--ins-muted); font-size: 14px; }
+.el-drawer { background: var(--ins-surface) !important; }
+.el-loading-mask {
+  background: color-mix(in srgb, var(--ins-bg) 72%, transparent) !important;
+}
+.el-message {
+  border-radius: 10px !important;
+  box-shadow: var(--ins-shadow) !important;
+  font-size: 14px;
+}
+
+.page-header {
+  background: var(--ins-surface);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--ins-line);
+  flex-shrink: 0;
+}
+.page-header .title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+/* 统一返回按钮：浅底描边，hover 主题色 */
+.el-button.back-btn {
+  --el-button-bg-color: var(--ins-bg);
+  --el-button-border-color: var(--ins-line-strong);
+  --el-button-text-color: var(--ins-ink-2);
+  --el-button-hover-bg-color: var(--el-color-primary-light-9);
+  --el-button-hover-border-color: var(--el-color-primary-light-5);
+  --el-button-hover-text-color: var(--el-color-primary);
+  --el-button-active-bg-color: var(--el-color-primary-light-8);
+  --el-button-active-border-color: var(--el-color-primary-light-5);
+  --el-button-active-text-color: var(--el-color-primary-dark-2);
+  display: inline-flex !important;
+  align-items: center;
+  gap: 4px;
+  min-height: 34px !important;
+  height: 34px;
+  padding: 0 12px 0 10px !important;
+  border-radius: 10px !important;
+  border: 1px solid var(--ins-line-strong) !important;
+  background: var(--ins-bg) !important;
+  color: var(--ins-ink-2) !important;
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  box-shadow: none !important;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
+}
+.el-button.back-btn:hover,
+.el-button.back-btn:focus {
+  background: var(--el-color-primary-light-9) !important;
+  border-color: var(--el-color-primary-light-5) !important;
+  color: var(--el-color-primary) !important;
+}
+.el-button.back-btn:active {
+  transform: translateY(1px);
+  background: var(--el-color-primary-light-8) !important;
+  color: var(--el-color-primary-dark-2) !important;
+}
+.el-button.back-btn .el-icon {
+  font-size: 15px;
+  margin: 0 !important;
+}
+.el-button.back-btn.is-icon-only {
+  width: 34px !important;
+  padding: 0 !important;
+  justify-content: center;
+}
+
+.icon-btn .el-icon {
+  font-size: 16px;
+}

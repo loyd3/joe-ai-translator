@@ -1,0 +1,23 @@
+html.dark {
+  color-scheme: dark;
+}
+
+html.dark .el-popper.is-light {
+  background: var(--ins-surface);
+  border-color: var(--ins-line-strong);
+}
+
+html.dark .el-popper.is-light .el-popper__arrow::before {
+  background: var(--ins-surface);
+  border-color: var(--ins-line-strong);
+}
+
+html.dark .el-loading-mask {
+  background: rgba(19, 19, 23, 0.7) !important;
+}
+
+html.dark .el-table {
+  --el-table-header-bg-color: var(--ins-bg-deep);
+  --el-table-tr-bg-color: var(--ins-surface);
+  --el-table-row-hover-bg-color: var(--ins-grad-soft);
+}

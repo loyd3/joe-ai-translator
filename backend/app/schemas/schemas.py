@@ -3,7 +3,7 @@ Pydantic 数据模型
 """
 
 from pydantic import BaseModel, Field, field_serializer
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -223,6 +223,7 @@ class LiteraryTranslationCreate(BaseModel):
     literary_type: LiteraryType = Field(default=LiteraryType.GENERAL)
     reference_document_ids: Optional[List[int]] = Field(default=None)
     user_requirements: Optional[str] = Field(default=None, description="翻译需求说明（风格、术语等）")
+    style_agent_id: Optional[int] = Field(default=None, description="文风智能体 ID，空则用系统默认")
 
 
 class LiteraryParagraphResponse(BaseModel):
@@ -243,6 +244,14 @@ class LiteraryParagraphResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+class LiteraryParagraphPage(BaseModel):
+    """文学翻译段落分页"""
+    items: List[LiteraryParagraphResponse]
+    total: int
+    skip: int
+    limit: int
 
 
 class LiteraryTranslationResponse(BaseModel):
@@ -267,11 +276,16 @@ class LiteraryTranslationResponse(BaseModel):
     ai_model: Optional[str]
     reference_document_ids: List[int]
     user_requirements: Optional[str] = None
+    style_agent_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime]
     completed_at: Optional[datetime]
     paragraphs: Optional[List[LiteraryParagraphResponse]] = None
     error_message: Optional[str] = None
+    has_step2: bool = False
+    has_step3: bool = False
+    has_step4: bool = False
+    paragraph_total: int = 0
 
     @field_serializer('created_at', 'updated_at', 'completed_at')
     def serialize_datetime(self, dt: Optional[datetime], _info):
@@ -318,6 +332,11 @@ class LiteraryTranslationListItem(BaseModel):
         from_attributes = True
 
 
+class StoryProfileUpdate(BaseModel):
+    """更新故事结构档案"""
+    profile: dict
+
+
 class ParagraphUpdateRequest(BaseModel):
     """更新段落译文请求"""
     user_edited_text: str = Field(..., min_length=0)
@@ -329,6 +348,56 @@ class LiteraryTranslationUpdate(BaseModel):
     source_text: Optional[str] = None
     final_translation: Optional[str] = None
     status: Optional[str] = None  # 状态管理：pending, translating, verifying, revising, finalizing, completed, failed
+    style_agent_id: Optional[int] = None
+    user_requirements: Optional[str] = None
+
+
+# ========== 文风智能体 ==========
+class StyleAgentConfig(BaseModel):
+    sentence: str = "跟随原文"
+    diction: str = "跟随原文"
+    idiom: str = "跟随原文"
+    register: str = "跟随原文"
+    compactness: str = "跟随原文"
+    taboo: List[str] = []
+    custom_text: str = ""
+    samples: List[str] = []
+
+
+class StyleAgentCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+    preset_key: Optional[str] = None
+    is_default: bool = False
+
+
+class StyleAgentFromPreset(BaseModel):
+    preset_key: str
+    set_default: bool = False
+
+
+class StyleAgentUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+    is_default: Optional[bool] = None
+
+
+class StyleAgentResponse(BaseModel):
+    id: int
+    name: str
+    description: str = ""
+    preset_key: Optional[str] = None
+    config: Dict[str, Any] = {}
+    is_default: bool = False
+    source: Optional[str] = "manual"
+    compiled_preview: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class WorkflowStepResponse(BaseModel):
@@ -380,6 +449,7 @@ class ProfessionalTermCreate(BaseModel):
     source_lang: str = Field(..., min_length=1)
     target_lang: str = Field(..., min_length=1)
     description: Optional[str] = None
+    translation_id: Optional[int] = Field(default=None, description="所属翻译任务；有值=小词库，空=大词库")
 
 
 class ProfessionalTermUpdate(BaseModel):
@@ -388,6 +458,7 @@ class ProfessionalTermUpdate(BaseModel):
     category: Optional[str] = Field(default=None, max_length=100)
     description: Optional[str] = None
     is_verified: Optional[bool] = None
+    translation_id: Optional[int] = Field(default=None, description="设为 null 可提升到大词库")
 
 
 class ProfessionalTermResponse(BaseModel):
@@ -402,6 +473,7 @@ class ProfessionalTermResponse(BaseModel):
     usage_count: int
     description: Optional[str]
     is_verified: bool
+    translation_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime]
 

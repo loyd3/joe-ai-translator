@@ -1,5 +1,21 @@
 import axios from 'axios'
 import { ElLoading, ElMessage } from 'element-plus'
+import type {
+  StyleAgent,
+  StyleAgentCreate,
+  StyleAgentPreset,
+  StyleAgentUpdate,
+  StyleExtractResult,
+} from './styleTypes'
+
+export type {
+  StyleAgent,
+  StyleAgentConfig,
+  StyleAgentCreate,
+  StyleAgentPreset,
+  StyleAgentUpdate,
+  StyleExtractResult,
+} from './styleTypes'
 
 const api = axios.create({
   baseURL: '/api',
@@ -113,15 +129,28 @@ export const translateApi = {
 export const systemApi = {
   getConfig: () => api.get('/system/config'),
   healthCheck: () => api.get('/system/health'),
+  listAIProviders: () => api.get('/system/ai-providers'),
   getAIConfig: () => api.get('/system/ai-config'),
   updateAIConfig: (data: {
-    provider: string;
-    api_key?: string;
-    model?: string;
-    base_url?: string;
-    temperature?: number;
-    max_tokens?: number;
+    provider: string
+    api_key?: string
+    model?: string
+    base_url?: string
+    temperature?: number
+    max_tokens?: number
+    top_p?: number
+    frequency_penalty?: number
+    presence_penalty?: number
+    timeout_seconds?: number
   }) => api.put('/system/ai-config', data),
+  testAIConfig: (data: {
+    provider: string
+    api_key?: string
+    model?: string
+    base_url?: string
+    temperature?: number
+    timeout_seconds?: number
+  }) => api.post('/system/ai-config/test', data),
 }
 
 // 文学翻译 API
@@ -170,18 +199,21 @@ export const literaryApi = {
     source_text: string
     source_lang: string
     target_lang: string
-    literary_type: 'poetry' | 'prose' | 'novel' | 'drama' | 'general'
+    literary_type: 'poetry' | 'prose' | 'novel' | 'drama' | 'general' | string
     reference_document_ids?: number[]
     user_requirements?: string
+    style_agent_id?: number
   }) => api.post('/literary/translations', data),
   
   // 获取翻译任务列表
   listTranslations: (params?: { skip?: number; limit?: number; status?: string }) => 
     api.get('/literary/translations', { params }),
   
-  // 获取翻译任务详情
-  getTranslation: (id: number, includeParagraphs?: boolean) => 
-    api.get(`/literary/translations/${id}`, { params: { include_paragraphs: includeParagraphs } }),
+  // 获取翻译任务详情。浏览长文时 includeParagraphs 与 includeSource 都传 false，再分页拉段落。
+  getTranslation: (id: number, includeParagraphs?: boolean, includeSource = true) =>
+    api.get(`/literary/translations/${id}`, {
+      params: { include_paragraphs: includeParagraphs, include_source: includeSource },
+    }),
   
   // 更新翻译任务（改）
   updateTranslation: (id: number, data: {
@@ -189,6 +221,8 @@ export const literaryApi = {
     source_text?: string
     final_translation?: string
     status?: string
+    style_agent_id?: number | null
+    user_requirements?: string
   }) => api.put(`/literary/translations/${id}`, data),
   
   // 删除翻译任务
@@ -210,13 +244,20 @@ export const literaryApi = {
   
   // ===== 段落管理 =====
   
-  // 获取所有段落
-  getParagraphs: (translationId: number) => 
-    api.get(`/literary/translations/${translationId}/paragraphs`),
+  // 分页获取段落
+  getParagraphs: (translationId: number, params?: { skip?: number; limit?: number }) =>
+    api.get<{ items: any[]; total: number; skip: number; limit: number }>(
+      `/literary/translations/${translationId}/paragraphs`,
+      { params }
+    ),
   
   // 更新段落（用户编辑）
   updateParagraph: (paragraphId: number, data: { user_edited_text: string }) => 
     api.put(`/literary/paragraphs/${paragraphId}`, data),
+
+  // 单段 AI 重译（四步流程，耗时较长）
+  retranslateParagraph: (paragraphId: number) =>
+    api.post(`/literary/paragraphs/${paragraphId}/retranslate`, null, { timeout: 300000 }),
   
   // ===== 导出 =====
 
@@ -234,6 +275,8 @@ export const literaryApi = {
     target_lang?: string;
     keyword?: string;
     is_verified?: boolean;
+    translation_id?: number;
+    scope?: 'document' | 'global';
     skip?: number;
     limit?: number;
   }) => api.get('/literary/terms', { params }),
@@ -247,6 +290,7 @@ export const literaryApi = {
     source_lang: string;
     target_lang: string;
     description?: string;
+    translation_id?: number;
   }) => api.post('/literary/terms', data),
 
   // 更新专业词汇
@@ -255,14 +299,21 @@ export const literaryApi = {
     category?: string;
     description?: string;
     is_verified?: boolean;
+    translation_id?: number | null;
   }) => api.put(`/literary/terms/${id}`, data),
 
   // 删除专业词汇
   deleteTerm: (id: number) => api.delete(`/literary/terms/${id}`),
 
+  // 小词库提升到大词库
+  promoteTerm: (id: number) => api.post(`/literary/terms/${id}/promote`),
+
   // 获取词汇分类列表
-  getTermCategories: (params?: { literary_type?: string }) =>
-    api.get('/literary/terms/categories', { params }),
+  getTermCategories: (params?: {
+    literary_type?: string;
+    translation_id?: number;
+    scope?: 'document' | 'global';
+  }) => api.get('/literary/terms/categories', { params }),
 
   // 获取翻译任务的词汇总结
   getTermSummary: (translationId: number) =>
@@ -299,6 +350,55 @@ export const literaryApi = {
   // 获取翻译进度
   getTranslationProgress: (translationId: number) =>
     api.get(`/literary/translations/${translationId}/progress`),
+
+  getStoryProfile: (translationId: number) =>
+    api.get(`/literary/translations/${translationId}/story`),
+
+  updateStoryProfile: (translationId: number, profile: Record<string, unknown>) =>
+    api.put(`/literary/translations/${translationId}/story`, { profile }),
+
+  regenerateStoryProfile: (translationId: number) =>
+    api.post(`/literary/translations/${translationId}/story/regenerate`, null, { timeout: 600000 }),
+}
+
+// ========== 文风智能体 API（系统级） ==========
+export const styleAgentApi = {
+  listPresets: () => api.get<StyleAgentPreset[]>('/style-agent-presets'),
+  list: () => api.get<StyleAgent[]>('/style-agents'),
+  create: (data: StyleAgentCreate) => api.post<StyleAgent>('/style-agents', data),
+  fromPreset: (presetKey: string, setDefault = false) =>
+    api.post<StyleAgent>('/style-agents/from-preset', {
+      preset_key: presetKey,
+      set_default: setDefault,
+    }),
+  update: (agentId: number, data: StyleAgentUpdate) =>
+    api.put<StyleAgent>(`/style-agents/${agentId}`, data),
+  setDefault: (agentId: number) =>
+    api.post<StyleAgent>(`/style-agents/${agentId}/set-default`),
+  delete: (agentId: number) => api.delete(`/style-agents/${agentId}`),
+  parseFiles: (files: File[]) => {
+    const form = new FormData()
+    files.forEach((f) => form.append('files', f))
+    return api.post<{
+      sources: { name: string; text: string; chars: number; format: string }[]
+      errors: string[]
+      count: number
+    }>('/style-agents/parse-files', form, {
+      timeout: 120000,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+  extractFromText: (data: {
+    text?: string
+    texts?: string[]
+    sources?: { name: string; text: string }[]
+    name?: string
+    save?: boolean
+    set_default?: boolean
+  }) =>
+    api.post<StyleExtractResult>('/style-agents/extract-from-text', data, {
+      timeout: 180000,
+    }),
 }
 
 export default api

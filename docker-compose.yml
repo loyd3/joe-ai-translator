@@ -30,7 +30,8 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-aitranslator123}
       TZ: Asia/Shanghai
     volumes:
-      - mysql_translator_data:/var/lib/mysql
+      # 默认命名卷会写进 Docker 虚拟磁盘。设置 MYSQL_DATA_PATH 后改为宿主机目录（本机放在 F 盘）。
+      - ${MYSQL_DATA_PATH:-mysql_translator_data}:/var/lib/mysql
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       # 映射到 3308，避免与本地 3306 和 writer 3307 冲突

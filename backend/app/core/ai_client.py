@@ -906,10 +906,20 @@ Output only the translated text, no additional comments."""
         target_lang: str,
         literary_type: str = "general",
         guidance: Optional[str] = None,
+        paragraph_count: Optional[int] = None,
     ) -> dict:
         """文学翻译 - 第四步：定稿。最终审校和润色，确保译文达到出版水准。"""
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
+        marker_rule = ""
+        if paragraph_count and paragraph_count >= 1:
+            marker_rule = f"""
+
+## 段落对齐（必须遵守）
+- 输入原文/译文已用 <<<PARA_0>>> ... <<<PARA_{paragraph_count - 1}>>> 标记分段
+- final_translation 必须保留全部 {paragraph_count} 个标记，顺序与编号不得改动
+- 不得合并、拆分或增删段落；每个标记后只放该段定稿译文
+- 禁止只用空行分段来代替这些标记"""
         
         if self.is_professional_type(literary_type):
             lit_type_name = self.get_literary_type_name(literary_type)
@@ -935,12 +945,13 @@ Output only the translated text, no additional comments."""
 ### 4. 完美准确
 - 零错误：无错译、漏译、增译
 - 细节到位：标点、格式、特殊内容处理得当
+{marker_rule}
 
 ## 输出格式
 
 请以JSON格式输出，包含以下字段：
 {{
-    "final_translation": "最终定稿译文（保持原文的段落划分，段落之间用两个换行符分隔）",
+    "final_translation": "最终定稿译文（若输入含 <<<PARA_N>>> 标记则必须原样保留这些标记）",
     "final_assessment": "总体评价（术语一致性 + 全篇统一性 + 专业规范度）",
     "beauty_sound_final": "术语准确度最终评价",
     "beauty_word_final": "表达规范度最终评价",
@@ -949,7 +960,7 @@ Output only the translated text, no additional comments."""
     "translator_note": "译者注（如有需要说明的特殊处理）"
 }}
 
-**重要：final_translation 中必须保持与原文相同的段落数量和段落划分，段落之间用两个换行符（\\n\\n）分隔。**"""
+**重要：若输入含段落标记，final_translation 必须保持相同的段落数量与 <<<PARA_N>>> 标记；否则保持原文段落划分并用两个换行符分隔。**"""
         else:
             system_prompt = f"""你是一位资深的翻译定稿专家。你将收到完整的原文和译文（之前是分段翻译的），请从全篇角度进行最后的审校和润色，确保达到出版品质。
 
@@ -982,12 +993,13 @@ Output only the translated text, no additional comments."""
 - 毫无翻译腔，读起来像目标语言的原创
 - 符合目标语言同类文体的表达习惯
 - 消除残留的生硬表达
+{marker_rule}
 
 ## 输出格式
 
 请以JSON格式输出，包含以下字段：
 {{
-    "final_translation": "最终定稿译文（保持原文的段落划分，段落之间用两个换行符分隔）",
+    "final_translation": "最终定稿译文（若输入含 <<<PARA_N>>> 标记则必须原样保留这些标记）",
     "final_assessment": "总体评价（原文风格判断 + 全篇统一性 + 三美达成度）",
     "beauty_sound_final": "音美最终评价",
     "beauty_word_final": "词美最终评价",
@@ -996,11 +1008,16 @@ Output only the translated text, no additional comments."""
     "translator_note": "译者注（如有需要说明的特殊处理）"
 }}
 
-**重要：final_translation 中必须保持与原文相同的段落数量和段落划分，段落之间用两个换行符（\\n\\n）分隔。**"""
+**重要：若输入含段落标记，final_translation 必须保持相同的段落数量与 <<<PARA_N>>> 标记；否则保持原文段落划分并用两个换行符分隔。**"""
 
+        keep_structure_hint = (
+            f"请从全篇角度进行最终定稿，统一风格和用词，并严格保留全部 {paragraph_count} 个 <<<PARA_N>>> 段落标记。"
+            if paragraph_count and paragraph_count >= 1
+            else "请从全篇角度进行最终定稿，统一风格和用词，保持段落结构不变。"
+        )
         messages = [
             {"role": "system", "content": self._apply_story_guidance(system_prompt, guidance)},
-            {"role": "user", "content": f"【完整原文】({source_name}):\n{source_text}\n\n【待定稿译文（分段翻译后合并）】({target_name}):\n{revised_translation}\n\n请从全篇角度进行最终定稿，统一风格和用词，保持段落结构不变。"}
+            {"role": "user", "content": f"【完整原文】({source_name}):\n{source_text}\n\n【待定稿译文（分段翻译后合并）】({target_name}):\n{revised_translation}\n\n{keep_structure_hint}"}
         ]
         
         response = await self.client.chat.completions.create(

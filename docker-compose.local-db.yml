@@ -24,7 +24,7 @@ services:
       MYSQL_PASSWORD: translator123
       TZ: Asia/Shanghai
     volumes:
-      - mysql_translator_data:/var/lib/mysql
+      - ${MYSQL_DATA_PATH:-mysql_translator_data}:/var/lib/mysql
     ports:
       # 映射到 3308，避免与本地 3306 和 writer 3307 冲突
       - "3308:3306"

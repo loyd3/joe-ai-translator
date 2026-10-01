@@ -218,13 +218,14 @@ async def upload_reference_document(
 # ============================================================
 
 MAX_PARAGRAPH_SIZE = 2000
+PARA_SEP = "\n\n"
+PARA_MARKER_RE = re.compile(r"<<<PARA_(\d+)>>>")
 
 
 def _split_oversized_paragraph(text: str, max_size: int = MAX_PARAGRAPH_SIZE) -> List[str]:
     """将超长段落按句子边界拆分为不超过 max_size 的块"""
     if len(text) <= max_size:
         return [text]
-    import re
     sentences = re.split(r'(?<=[。！？.!?\n])', text)
     chunks, current = [], ""
     for s in sentences:
@@ -244,9 +245,18 @@ def _split_oversized_paragraph(text: str, max_size: int = MAX_PARAGRAPH_SIZE) ->
 
 def split_text_into_paragraphs(text: str, max_size: int = MAX_PARAGRAPH_SIZE) -> List[str]:
     """将文本分割成段落，并确保每段不超过 max_size 字符"""
-    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-    if not paragraphs:
-        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return []
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    # 几乎没有空行分段时：若单行大多较短，更像真实段落；硬折行长文不要按行拆
+    if len(paragraphs) <= 1:
+        single = [p.strip() for p in text.split("\n") if p.strip()]
+        if len(single) > len(paragraphs):
+            avg_len = sum(len(p) for p in single) / len(single)
+            short_ratio = sum(1 for p in single if len(p) <= 120) / len(single)
+            if avg_len <= 160 or short_ratio >= 0.7:
+                paragraphs = single
     result = []
     for p in paragraphs:
         if len(p) > max_size:
@@ -254,6 +264,64 @@ def split_text_into_paragraphs(text: str, max_size: int = MAX_PARAGRAPH_SIZE) ->
         else:
             result.append(p)
     return result
+
+
+def _pack_marked_paragraphs(texts: List[str]) -> str:
+    """用稳定标记包装段落，避免定稿后按 \\n\\n 拆分错位。"""
+    parts = []
+    for i, text in enumerate(texts):
+        parts.append(f"<<<PARA_{i}>>>\n{(text or '').strip()}")
+    return "\n".join(parts)
+
+
+def _unpack_marked_paragraphs(text: str, expected: int) -> Optional[List[str]]:
+    """解析带 <<<PARA_N>>> 标记的定稿结果；数量/顺序不匹配时返回 None。"""
+    if not text or expected <= 0:
+        return None
+    matches = list(PARA_MARKER_RE.finditer(text))
+    if len(matches) != expected:
+        return None
+    indexes = [int(m.group(1)) for m in matches]
+    if indexes != list(range(expected)):
+        return None
+    parts: List[str] = []
+    for i, match in enumerate(matches):
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        parts.append(text[start:end].strip())
+    return parts
+
+
+def _align_finalized_parts(
+    finalized_text: str,
+    fallback_texts: List[str],
+) -> List[str]:
+    """
+    将定稿全文安全映射回各段。
+    优先使用段落标记；若出现过标记但无法完整解析，直接回退 step3，避免错位。
+    仅在完全没有标记时，才允许 \\n\\n 分段且数量完全一致。
+    """
+    expected = len(fallback_texts)
+    if expected == 0:
+        return []
+    text = finalized_text or ""
+    has_markers = bool(PARA_MARKER_RE.search(text))
+    marked = _unpack_marked_paragraphs(text, expected)
+    if marked is not None:
+        return marked
+    if has_markers:
+        print(
+            f"[Step4 Align] marker parse failed (expected={expected}); keep step3 revisions"
+        )
+        return [(t or "").strip() for t in fallback_texts]
+    plain_parts = [p.strip() for p in text.split(PARA_SEP)]
+    if len(plain_parts) == expected and all(plain_parts):
+        return plain_parts
+    print(
+        f"[Step4 Align] paragraph count mismatch: got={len(plain_parts)} "
+        f"expected={expected}; keep step3 revisions"
+    )
+    return [(t or "").strip() for t in fallback_texts]
 
 
 def _sanitize_text_for_api(text: str) -> str:
@@ -658,6 +726,38 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
 STEP4_BATCH_CHARS = 6000
 
 
+def _apply_finalized_parts(paragraphs: list, finalized_parts: List[str]) -> None:
+    for para, text in zip(paragraphs, finalized_parts):
+        para.step4_finalization = text
+        para.translated_text = text
+
+
+async def _finalize_paragraph_batch(
+    client,
+    translation,
+    batch: list,
+    db: Session,
+) -> None:
+    """对一批段落做定稿，并用标记对齐写回，避免原文/译文错位。"""
+    fallback_texts = [
+        (p.step3_revision or p.translated_text or "") for p in batch
+    ]
+    batch_source = _pack_marked_paragraphs([p.source_text or "" for p in batch])
+    batch_revised = _pack_marked_paragraphs(fallback_texts)
+    result = await client.literary_finalize(
+        batch_source,
+        batch_revised,
+        translation.source_lang,
+        translation.target_lang,
+        translation.literary_type,
+        guidance=build_prompt_guidance(translation, db, include_story=True) or None,
+        paragraph_count=len(batch),
+    )
+    finalized_text = result.get("final_translation", batch_revised)
+    finalized_parts = _align_finalized_parts(finalized_text, fallback_texts)
+    _apply_finalized_parts(batch, finalized_parts)
+
+
 async def _execute_step4(translation_id: int, db: Session) -> None:
     """执行第四步：定稿 — 分批整合段落统一处理，支持大文件"""
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
@@ -668,7 +768,6 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
 
-    PARA_SEP = "\n\n"
     total_chars = sum(len(p.step3_revision or p.translated_text or "") for p in paragraphs)
 
     if total_chars <= STEP4_BATCH_CHARS:
@@ -677,25 +776,7 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
             translation.error_message = "Cancelled by user"
             db.commit()
             raise WorkflowCancelled()
-        full_source = PARA_SEP.join(p.source_text for p in paragraphs)
-        full_revised = PARA_SEP.join(
-            (p.step3_revision or p.translated_text or "") for p in paragraphs
-        )
-        result = await client.literary_finalize(
-            full_source, full_revised,
-            translation.source_lang, translation.target_lang, translation.literary_type,
-            guidance=build_prompt_guidance(translation, db, include_story=True) or None,
-        )
-        finalized_full = result.get("final_translation", full_revised)
-        finalized_parts = finalized_full.split(PARA_SEP)
-        for i, para in enumerate(paragraphs):
-            text = finalized_parts[i].strip() if i < len(finalized_parts) else (para.step3_revision or para.translated_text or "")
-            para.step4_finalization = text
-            para.translated_text = text
-        if len(finalized_parts) > len(paragraphs):
-            extra = PARA_SEP.join(finalized_parts[len(paragraphs):])
-            paragraphs[-1].step4_finalization += PARA_SEP + extra
-            paragraphs[-1].translated_text = paragraphs[-1].step4_finalization
+        await _finalize_paragraph_batch(client, translation, paragraphs, db)
     else:
         batches: list[list] = []
         current_batch: list = []
@@ -718,25 +799,7 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
                 translation.error_message = "Cancelled by user"
                 db.commit()
                 raise WorkflowCancelled()
-            batch_source = PARA_SEP.join(p.source_text for p in batch)
-            batch_revised = PARA_SEP.join(
-                (p.step3_revision or p.translated_text or "") for p in batch
-            )
-            result = await client.literary_finalize(
-                batch_source, batch_revised,
-                translation.source_lang, translation.target_lang, translation.literary_type,
-                guidance=build_prompt_guidance(translation, db, include_story=True) or None,
-            )
-            finalized_text = result.get("final_translation", batch_revised)
-            finalized_parts = finalized_text.split(PARA_SEP)
-            for i, para in enumerate(batch):
-                text = finalized_parts[i].strip() if i < len(finalized_parts) else (para.step3_revision or para.translated_text or "")
-                para.step4_finalization = text
-                para.translated_text = text
-            if len(finalized_parts) > len(batch):
-                extra = PARA_SEP.join(finalized_parts[len(batch):])
-                batch[-1].step4_finalization += PARA_SEP + extra
-                batch[-1].translated_text = batch[-1].step4_finalization
+            await _finalize_paragraph_batch(client, translation, batch, db)
 
     finalized_all = PARA_SEP.join(
         (p.step4_finalization or p.translated_text or "") for p in paragraphs
@@ -2133,6 +2196,7 @@ def _extract_text_pdf(content: bytes) -> str:
 
 def _extract_text_mobi(content: bytes) -> str:
     """从 MOBI/AZW 电子书提取正文。解压后可能是 HTML/EPUB/PDF，按类型处理"""
+    import html as html_lib
     import mobi
     fd, path = tempfile.mkstemp(suffix=".mobi")
     try:
@@ -2146,9 +2210,20 @@ def _extract_text_mobi(content: bytes) -> str:
                     return _extract_text_pdf(f.read())
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 raw = f.read()
-            text = re.sub(r"<[^>]+>", " ", raw)
-            text = re.sub(r"\s+", " ", text).strip()
-            return text
+            # 保留块级结构，避免整本书被压成一行后只能按字数硬切
+            text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", raw)
+            text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+            text = re.sub(
+                r"(?i)</\s*(p|div|h[1-6]|li|tr|section|article|blockquote)\s*>",
+                "\n\n",
+                text,
+            )
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = html_lib.unescape(text)
+            text = re.sub(r"[ \t]+\n", "\n", text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            text = re.sub(r"[ \t]{2,}", " ", text)
+            return text.strip()
         finally:
             shutil.rmtree(tempdir, ignore_errors=True)
     finally:

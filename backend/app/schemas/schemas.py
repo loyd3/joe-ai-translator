@@ -217,6 +217,7 @@ class ReferenceDocumentListItem(BaseModel):
 class LiteraryTranslationCreate(BaseModel):
     """创建文学翻译任务请求"""
     title: Optional[str] = None
+    group_name: Optional[str] = Field(default=None, max_length=200, description="用户自定义分组，空=未分组")
     source_text: str = Field(..., min_length=1)
     source_lang: str = Field(..., min_length=1)
     target_lang: str = Field(..., min_length=1)
@@ -224,6 +225,7 @@ class LiteraryTranslationCreate(BaseModel):
     reference_document_ids: Optional[List[int]] = Field(default=None)
     user_requirements: Optional[str] = Field(default=None, description="翻译需求说明（风格、术语等）")
     style_agent_id: Optional[int] = Field(default=None, description="文风智能体 ID，空则用系统默认")
+    collab_mode: Optional[str] = Field(default=None, description="online|local|collab，空则用系统默认")
 
 
 class LiteraryParagraphResponse(BaseModel):
@@ -258,6 +260,7 @@ class LiteraryTranslationResponse(BaseModel):
     """文学翻译任务响应"""
     id: int
     title: Optional[str]
+    group_name: Optional[str] = None
     source_text: str
     step1_translation: Optional[str]
     step2_verification: Optional[str]
@@ -269,6 +272,7 @@ class LiteraryTranslationResponse(BaseModel):
     source_lang: str
     target_lang: str
     literary_type: str
+    collab_mode: Optional[str] = None
     beauty_sound_score: Optional[float]
     beauty_word_score: Optional[float]
     beauty_meaning_score: Optional[float]
@@ -306,12 +310,14 @@ class LiteraryTranslationListItem(BaseModel):
     """文学翻译任务列表项"""
     id: int
     title: Optional[str]
+    group_name: Optional[str] = None
     status: str
     current_step: int
     error_message: Optional[str] = None
     source_lang: str
     target_lang: str
     literary_type: str
+    collab_mode: Optional[str] = None
     beauty_sound_score: Optional[float]
     beauty_word_score: Optional[float]
     beauty_meaning_score: Optional[float]
@@ -332,6 +338,38 @@ class LiteraryTranslationListItem(BaseModel):
         from_attributes = True
 
 
+class LiteraryTranslationListPage(BaseModel):
+    """文学翻译任务分页列表"""
+    items: List[LiteraryTranslationListItem]
+    total: int
+    skip: int
+    limit: int
+
+
+class TranslationGroupItem(BaseModel):
+    """翻译文档分组"""
+    id: Optional[int] = None
+    name: str
+    count: int = 0
+    sort_order: int = 0
+
+
+class TranslationGroupCreate(BaseModel):
+    """新建分组"""
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class TranslationGroupRename(BaseModel):
+    """重命名分组"""
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class TranslationGroupBulkAssign(BaseModel):
+    """批量设置文档分组"""
+    translation_ids: List[int] = Field(..., min_length=1)
+    group_name: Optional[str] = Field(default=None, max_length=200, description="空或 null 表示移出分组")
+
+
 class StoryProfileUpdate(BaseModel):
     """更新故事结构档案"""
     profile: dict
@@ -345,6 +383,7 @@ class ParagraphUpdateRequest(BaseModel):
 class LiteraryTranslationUpdate(BaseModel):
     """更新文学翻译任务请求"""
     title: Optional[str] = None
+    group_name: Optional[str] = Field(default=None, max_length=200)
     source_text: Optional[str] = None
     final_translation: Optional[str] = None
     status: Optional[str] = None  # 状态管理：pending, translating, verifying, revising, finalizing, completed, failed

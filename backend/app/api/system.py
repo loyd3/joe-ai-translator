@@ -170,6 +170,13 @@ def _serialize_config(db_cfg: AIConfig, settings) -> Dict[str, Any]:
         "frequency_penalty": db_cfg.frequency_penalty if db_cfg.frequency_penalty is not None else 0.0,
         "presence_penalty": db_cfg.presence_penalty if db_cfg.presence_penalty is not None else 0.0,
         "timeout_seconds": db_cfg.timeout_seconds if db_cfg.timeout_seconds is not None else 120,
+        "collab_mode": db_cfg.collab_mode or "online",
+        "draft_provider": db_cfg.draft_provider or "ollama",
+        "draft_api_key_masked": _mask_key(db_cfg.draft_api_key),
+        "draft_has_api_key": bool(db_cfg.draft_api_key) or (db_cfg.draft_provider or "ollama") == "ollama",
+        "draft_model": db_cfg.draft_model or "llama3.2",
+        "draft_base_url": db_cfg.draft_base_url or "http://localhost:11434/v1",
+        "draft_fallback": True if db_cfg.draft_fallback is None else bool(db_cfg.draft_fallback),
         "source": "database",
         "available_providers": PROVIDER_CATALOG,
     }
@@ -216,6 +223,12 @@ class AIConfigUpdate(BaseModel):
     frequency_penalty: Optional[float] = Field(None, ge=-2, le=2)
     presence_penalty: Optional[float] = Field(None, ge=-2, le=2)
     timeout_seconds: Optional[int] = Field(None, ge=10, le=600)
+    collab_mode: Optional[str] = None
+    draft_provider: Optional[str] = None
+    draft_api_key: Optional[str] = None
+    draft_model: Optional[str] = None
+    draft_base_url: Optional[str] = None
+    draft_fallback: Optional[bool] = None
 
 
 class AIConfigTestRequest(BaseModel):
@@ -225,6 +238,7 @@ class AIConfigTestRequest(BaseModel):
     base_url: Optional[str] = None
     temperature: Optional[float] = 0.2
     timeout_seconds: Optional[int] = 30
+    use_draft_key: bool = False
 
 
 @router.get("/ai-providers")
@@ -272,6 +286,13 @@ async def get_ai_config(db: Session = Depends(get_db)):
         "frequency_penalty": 0.0,
         "presence_penalty": 0.0,
         "timeout_seconds": 120,
+        "collab_mode": "online",
+        "draft_provider": "ollama",
+        "draft_api_key_masked": "",
+        "draft_has_api_key": True,
+        "draft_model": settings.ollama_model or "llama3.2",
+        "draft_base_url": settings.ollama_base_url or "http://localhost:11434/v1",
+        "draft_fallback": True,
         "source": "env",
         "available_providers": PROVIDER_CATALOG,
     }
@@ -333,6 +354,46 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
     if request.timeout_seconds is not None:
         db_cfg.timeout_seconds = request.timeout_seconds
 
+    mode = (request.collab_mode or db_cfg.collab_mode or "online").strip()
+    if mode not in ("online", "local", "collab"):
+        raise HTTPException(status_code=400, detail="翻译模式必须是 online、local 或 collab")
+    db_cfg.collab_mode = mode
+
+    if request.draft_provider is not None:
+        if request.draft_provider not in catalog:
+            raise HTTPException(status_code=400, detail=f"不支持的本地提供商: {request.draft_provider}")
+        db_cfg.draft_provider = request.draft_provider
+    elif not (db_cfg.draft_provider or "").strip():
+        db_cfg.draft_provider = "ollama"
+
+    if request.draft_api_key is not None and request.draft_api_key.strip():
+        db_cfg.draft_api_key = request.draft_api_key.strip()
+    if (db_cfg.draft_provider or "ollama") == "ollama" and not (db_cfg.draft_api_key or "").strip():
+        db_cfg.draft_api_key = "ollama"
+
+    draft_defaults = PROVIDER_DEFAULTS.get(db_cfg.draft_provider or "ollama", {})
+    if request.draft_model is not None:
+        db_cfg.draft_model = request.draft_model.strip() or draft_defaults.get("model")
+    elif not (db_cfg.draft_model or "").strip():
+        db_cfg.draft_model = draft_defaults.get("model") or "llama3.2"
+
+    if request.draft_base_url is not None:
+        db_cfg.draft_base_url = request.draft_base_url.strip() or draft_defaults.get("base_url")
+    elif not (db_cfg.draft_base_url or "").strip():
+        db_cfg.draft_base_url = draft_defaults.get("base_url") or "http://localhost:11434/v1"
+
+    if request.draft_fallback is not None:
+        db_cfg.draft_fallback = request.draft_fallback
+    elif db_cfg.draft_fallback is None:
+        db_cfg.draft_fallback = True
+
+    # 始终校验本地配置（配置页同时保存本地+线上，模式在开始翻译时再选）
+    draft_meta = catalog.get(db_cfg.draft_provider or "ollama", {})
+    if draft_meta.get("requires_api_key") and not (db_cfg.draft_api_key or "").strip():
+        raise HTTPException(status_code=400, detail="本地模型需要填写 API Key")
+    if (db_cfg.draft_provider or "") == "custom" and not (db_cfg.draft_base_url or "").strip():
+        raise HTTPException(status_code=400, detail="本地自定义提供商需要填写 API 地址")
+
     db.commit()
     db.refresh(db_cfg)
 
@@ -361,8 +422,15 @@ async def test_ai_config(request: AIConfigTestRequest, db: Session = Depends(get
     db_cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
 
     api_key = (request.api_key or "").strip()
-    if not api_key and db_cfg and db_cfg.provider == request.provider:
-        api_key = (db_cfg.api_key or "").strip()
+    if not api_key and db_cfg:
+        same_primary = db_cfg.provider == request.provider
+        same_draft = (db_cfg.draft_provider or "") == request.provider
+        if request.use_draft_key and same_draft:
+            api_key = (db_cfg.draft_api_key or "").strip()
+        elif same_primary:
+            api_key = (db_cfg.api_key or "").strip()
+        elif same_draft:
+            api_key = (db_cfg.draft_api_key or "").strip()
     if request.provider == "ollama" and not api_key:
         api_key = "ollama"
     if meta.get("requires_api_key") and not api_key:

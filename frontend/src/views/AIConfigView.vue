@@ -6,7 +6,7 @@
         返回
       </el-button>
       <h1 class="title">大模型配置</h1>
-      <span class="subtitle">多提供商 · 模型与采样参数</span>
+      <span class="subtitle">本地模型 + 线上模型 · 开始翻译时再选模式</span>
     </div>
     <div class="page-body">
       <AIConfigPanel @saved="emit('saved')" />

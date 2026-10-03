@@ -137,6 +137,11 @@
                 <el-option label="医学" value="medical" />
               </el-option-group>
             </el-select>
+            <el-select v-model="selectedCollabMode" placeholder="模型模式" size="small" style="width: 120px; margin-left: 8px;">
+              <el-option label="全部线上" value="online" />
+              <el-option label="全部本地" value="local" />
+              <el-option label="混合" value="collab" />
+            </el-select>
           </div>
           <div class="footer-right">
             <el-button type="primary" size="default" :loading="isTranslating" @click="startTranslation">
@@ -411,7 +416,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Document, Memo, Monitor, DataLine, Grid, Upload, Edit, Delete, Collection, Clock, Brush } from '@element-plus/icons-vue'
-import { literaryApi, translateApi } from '@/api'
+import { literaryApi, systemApi, translateApi } from '@/api'
 import TermLibraryView from '@/views/TermLibraryView.vue'
 import StyleAgentsView from '@/views/StyleAgentsView.vue'
 import StyleAgentPicker from '@/components/StyleAgentPicker.vue'
@@ -432,6 +437,7 @@ const outputText = ref('')
 const userRequirements = ref('')
 const selectedStyleAgentId = ref<number | undefined>(undefined)
 const selectedLiteraryType = ref('general')
+const selectedCollabMode = ref<'online' | 'local' | 'collab'>('online')
 const uploadRef = ref<any>(null)
 const currentTask = ref<any>(null)
 const paragraphs = ref<any[]>([])
@@ -562,10 +568,11 @@ const startTranslation = async () => {
       literary_type: selectedLiteraryType.value as any,
       user_requirements: userRequirements.value.trim() || undefined,
       style_agent_id: selectedStyleAgentId.value,
+      collab_mode: selectedCollabMode.value,
     })
     currentTask.value = response.data
     currentStep.value = 1
-    await literaryApi.startWorkflow(currentTask.value.id)
+    await literaryApi.startWorkflow(currentTask.value.id, { collab_mode: selectedCollabMode.value })
     startComponentPolling()
   } catch (error) {
     ElMessage.error('翻译失败')
@@ -573,8 +580,8 @@ const startTranslation = async () => {
   }
 }
 
-const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
-const allowedUploadExtensions = new Set(['txt', 'md', 'markdown', 'text', 'doc', 'docx', 'pdf', 'mobi', 'azw', 'html', 'htm', 'xml', 'json', 'csv', 'yaml', 'yml', 'rst', 'tex', 'srt', 'sub', 'vtt', 'log', 'ini', 'cfg', 'properties'])
+const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.azw3,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
+const allowedUploadExtensions = new Set(['txt', 'md', 'markdown', 'text', 'doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3', 'html', 'htm', 'xml', 'json', 'csv', 'yaml', 'yml', 'rst', 'tex', 'srt', 'sub', 'vtt', 'log', 'ini', 'cfg', 'properties'])
 const onFileSelect = async (opts: { file: File }) => {
   const file = opts?.file
   if (!file) return
@@ -591,6 +598,7 @@ const onFileSelect = async (opts: { file: File }) => {
     form.append('target_lang', currentTask.value?.target_lang || 'en')
     form.append('literary_type', selectedLiteraryType.value)
     form.append('auto_run', 'true')
+    form.append('collab_mode', selectedCollabMode.value)
     if (userRequirements.value.trim()) form.append('user_requirements', userRequirements.value.trim())
     if (selectedStyleAgentId.value != null) form.append('style_agent_id', String(selectedStyleAgentId.value))
     const res = await literaryApi.uploadAndTranslate(form)
@@ -689,7 +697,7 @@ const proceedToNext = async () => {
   if (!currentTask.value) return
   isProcessing.value = true
   try {
-    await literaryApi.startWorkflow(currentTask.value.id)
+    await literaryApi.startWorkflow(currentTask.value.id, { collab_mode: selectedCollabMode.value })
     startComponentPolling()
   } catch (error) {
     ElMessage.error('处理失败')
@@ -761,7 +769,7 @@ const exportResult = async () => {
 const loadHistory = async () => {
   try {
     const response = await literaryApi.listTranslations({ limit: 20 })
-    taskHistory.value = response.data
+    taskHistory.value = response.data.items || []
   } catch (error) {
     console.error('Failed to load history:', error)
   }
@@ -859,9 +867,18 @@ const getScoreColor = (score: number) => {
   return '#f56c6c'
 }
 
+async function loadDefaultCollabMode() {
+  try {
+    const res = await systemApi.getAIConfig()
+    const m = res.data?.collab_mode
+    if (m === 'local' || m === 'collab' || m === 'online') selectedCollabMode.value = m
+  } catch { /* ignore */ }
+}
+
 onMounted(() => {
   loadLanguages()
   loadHistory()
+  loadDefaultCollabMode()
 })
 
 onUnmounted(() => {

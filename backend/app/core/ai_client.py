@@ -5,9 +5,10 @@
 
 import os
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 import openai
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import AsyncGenerator, Optional, List
 
 # 项目根目录 .env（与 start.py 同目录），便于从 backend/ 启动时也能读到
@@ -32,6 +33,12 @@ def _safe_print(msg: str) -> None:
 
 class Settings(BaseSettings):
     """应用配置"""
+    # 优先项目根 .env；忽略仅给 Docker/脚本用的变量（如 MYSQL_DATA_PATH）
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE) if _ENV_FILE.exists() else ".env",
+        extra="ignore",
+    )
+
     # 应用与 CORS
     app_name: str = "AI Translator"
     app_version: str = "1.0.0"
@@ -74,10 +81,9 @@ class Settings(BaseSettings):
     # Ollama（本地模型，通常无需 API Key）
     ollama_base_url: Optional[str] = None
     ollama_model: str = "llama3.2"
-
-    class Config:
-        # 优先项目根 .env，不存在则用当前目录 .env
-        env_file = str(_ENV_FILE) if _ENV_FILE.exists() else ".env"
+    # 本地上下文窗口；Ollama 默认常为 2048，过短会截断提示导致质量骤降
+    ollama_num_ctx: int = 8192
+    ollama_timeout_seconds: int = 300
 
 
 # 全局配置实例
@@ -170,13 +176,16 @@ class AIClient:
         "ollama": "llama3.2",
     }
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Optional[Settings] = None, override: Optional[dict] = None):
         self.settings = settings or get_settings()
+        self._override = override
         self._client = None
         self._init_client()
 
     def _load_db_config(self):
         """尝试从数据库加载配置，返回配置 dict 或 None"""
+        if self._override is not None:
+            return self._override
         try:
             from app.database import SessionLocal
             from app.models.models import AIConfig
@@ -233,9 +242,19 @@ class AIClient:
                 raise ValueError("Custom provider requires base_url")
             if provider == "ollama" and (not api_key or not str(api_key).strip()):
                 api_key = "ollama"
-            timeout = self._db_timeout_seconds or 120
+            # 本地推理常更慢，超时下限 180s
+            default_timeout = 300 if provider == "ollama" else 120
+            timeout = self._db_timeout_seconds or default_timeout
+            if provider == "ollama":
+                timeout = max(int(timeout), 180)
+                self._ollama_num_ctx = getattr(self.settings, "ollama_num_ctx", None) or 8192
+            self.provider = provider
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
-            _safe_print(f"[AIClient] Initialized from DB: provider={provider}, model={self.model}")
+            scale = self._estimate_model_scale(self.model) if provider == "ollama" else "-"
+            _safe_print(
+                f"[AIClient] Initialized from DB: provider={provider}, model={self.model}, "
+                f"scale={scale}, timeout={timeout}"
+            )
             return
 
         provider = self.settings.ai_provider
@@ -261,6 +280,7 @@ class AIClient:
             api_key = getattr(self.settings, "ollama_api_key", None) or "ollama"
             base_url = self.settings.ollama_base_url or self.PROVIDER_BASE_URLS["ollama"]
             self.model = self.settings.ollama_model or self.PROVIDER_DEFAULT_MODELS["ollama"]
+            self._ollama_num_ctx = getattr(self.settings, "ollama_num_ctx", None) or 8192
         elif provider in self.PROVIDER_BASE_URLS:
             api_key = getattr(self.settings, f"{provider}_api_key", None)
             base_url = getattr(self.settings, f"{provider}_base_url", None) or self.PROVIDER_BASE_URLS[provider]
@@ -271,13 +291,18 @@ class AIClient:
         if not api_key and provider != "ollama":
             raise ValueError(f"API key not configured for provider: {provider}")
 
+        self.provider = provider
         self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=120)
         _safe_print(f"[AIClient] Initialized from .env: provider={provider}, model={self.model}")
 
     def reload_from_db(self):
         """重新从数据库加载配置并重新初始化客户端"""
+        reset_ai_clients()
+        self._override = None
         self._client = None
         self._init_client()
+        global _ai_client_instance
+        _ai_client_instance = self
 
     @property
     def effective_max_tokens(self) -> int:
@@ -288,6 +313,41 @@ class AIClient:
         if self._db_temperature is not None:
             return self._db_temperature
         return self.settings.ai_temperature
+
+    def _is_local_client(self) -> bool:
+        return bool(self._override) or getattr(self, "provider", "") == "ollama"
+
+    @staticmethod
+    def _estimate_model_scale(model: Optional[str]) -> str:
+        """根据模型名估算规模：small / medium / large。"""
+        import re as _re
+        m = (model or "").lower()
+        match = _re.search(r"(\d+(?:\.\d+)?)\s*b\b", m)
+        if match:
+            n = float(match.group(1))
+            if n >= 30:
+                return "large"
+            if n >= 10:
+                return "medium"
+            return "small"
+        if any(tag in m for tag in ("70b", "72b", "65b", "34b", "33b", "32b")):
+            return "large"
+        if any(tag in m for tag in ("13b", "14b", "15b", "16b", "20b", "22b", "27b")):
+            return "medium"
+        return "small"
+
+    def _local_scale(self) -> str:
+        return self._estimate_model_scale(getattr(self, "model", ""))
+
+    def _ollama_options(self) -> dict:
+        """Ollama 原生 options：拉大上下文，减少提示被静默截断。"""
+        settings = get_settings()
+        num_ctx = getattr(self, "_ollama_num_ctx", None) or getattr(settings, "ollama_num_ctx", None) or 8192
+        try:
+            num_ctx = max(2048, int(num_ctx))
+        except (TypeError, ValueError):
+            num_ctx = 8192
+        return {"num_ctx": num_ctx}
 
     def _sampling_kwargs(
         self,
@@ -306,6 +366,9 @@ class AIClient:
             kwargs["frequency_penalty"] = self._db_frequency_penalty
         if self._db_presence_penalty is not None:
             kwargs["presence_penalty"] = self._db_presence_penalty
+        # OpenAI 兼容的 Ollama 端点通过 extra_body.options 传 num_ctx
+        if getattr(self, "provider", "") == "ollama":
+            kwargs["extra_body"] = {"options": self._ollama_options()}
         return kwargs
 
     @property
@@ -449,17 +512,44 @@ Output only the translated text, no additional comments."""
         source_lang: str, 
         target_lang: str,
         literary_type: str = "general",
-        reference_content: Optional[str] = None
+        reference_content: Optional[str] = None,
+        *,
+        draft_mode: bool = False,
     ) -> list:
         """
         构建翻译提示词 - 第一步：初译
-        文学类使用三美原则，专业类使用领域规范
+        draft_mode：本地小模型用更短、更强调忠实翻译的提示，减少邻段串译和幻觉。
         """
         text = self._sanitize_for_api(text)
         reference_content = self._sanitize_for_api(reference_content) if reference_content else None
         source_name = self.get_language_name(source_lang)
         target_name = self.get_language_name(target_lang)
         lit_type_name = self.get_literary_type_name(literary_type)
+
+        if draft_mode:
+            system_prompt = f"""你是{source_name}→{target_name}的忠实翻译器。
+
+硬性规则：
+1. 只翻译【待译原文】中的内容，禁止翻译上下文，禁止根据上下文改写或补全
+2. 不要解释、不要评论、不要加标题、不要输出思考过程
+3. 不要编造原文没有的人名、情节、地名
+4. 专名（书名、人名、地名）按通行译法；不确定时音译或保留原文
+5. 保持原文段落与换行
+6. 输出只能是译文本身；严禁输出【待译原文】【待译原文结束】【上下文】等任何提示标记"""
+            if self.is_professional_type(literary_type):
+                system_prompt += f"\n7. 这是{lit_type_name}，术语需准确，不要文学化发挥"
+            user_content = (
+                f"目标语言：{target_name}\n"
+                f"文本类型：{lit_type_name}\n\n"
+                f"【待译原文】\n{text}\n【待译原文结束】\n\n"
+                f"请只输出{target_name}译文正文，不要包含【待译原文】【待译原文结束】等标记。"
+            )
+            if reference_content:
+                system_prompt += f"\n\n术语/参考（仅统一译名，勿扩写）：\n{reference_content[:2000]}"
+            return [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ]
 
         if self.is_professional_type(literary_type):
             domain_notes = self._build_professional_domain_notes(literary_type)
@@ -524,10 +614,11 @@ Output only the translated text, no additional comments."""
 2. **三美优化**：在风格框架内追求音美、词美、意美的最佳表现
 3. **自然流畅**：符合{target_name}的自然表达习惯，杜绝翻译腔
 4. **准确传意**：忠实传达原文的信息、情感和深层含义
+5. **只译指定原文**：若提供了上下文，上下文仅供衔接参考，禁止翻译上下文，禁止据此编造情节
 
 ## 输出格式
 
-请直接输出译文，不要添加解释或评论。保持原文的段落和格式结构。"""
+请直接输出译文正文，不要添加解释、评论，也不要输出【待译原文】【待译原文结束】等任何提示标记。保持原文的段落和格式结构。"""
 
         if reference_content:
             system_prompt += f"""
@@ -540,9 +631,104 @@ Output only the translated text, no additional comments."""
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"请翻译以下{lit_type_name}：\n\n{text}"}
+            {
+                "role": "user",
+                "content": (
+                    f"请翻译以下{lit_type_name}。只翻译【待译原文】，不要翻译上下文；"
+                    f"输出中不要包含【待译原文】【待译原文结束】等标记。\n\n"
+                    f"【待译原文】\n{text}\n【待译原文结束】"
+                ),
+            },
         ]
         return messages
+
+    # 提示用标记（禁止出现在译文中）；与分段用的 <<<PARA_N>>> 无关
+    _PROMPT_MARKER_NAMES = (
+        r"待译原文结束",
+        r"待译原文开始",
+        r"待译原文",
+        r"上下文[·・]?禁止翻译[·・]?禁止写入译文",
+        r"上下文结束",
+        r"上下文",
+        r"完整原文",
+        r"待润色译文",
+        r"待定稿译文(?:（[^】\]]*)?）?",
+        r"原文结束",
+        r"译文结束",
+    )
+
+    @classmethod
+    def _strip_translation_wrappers(cls, text: str) -> str:
+        """去掉提示标记/说明外壳，但保留段落空行与 <<<PARA_N>>> 分段标记。"""
+        import re as _re
+        s = text or ""
+        if not s.strip():
+            return ""
+
+        # 暂存分段标记，清洗时绝不动它们
+        para_holders: dict[str, str] = {}
+
+        def _hold_para(m) -> str:
+            key = f"\uE000PARA{m.group(1)}\uE001"
+            para_holders[key] = m.group(0)
+            return key
+
+        s = _re.sub(r"<<<PARA_(\d+)>>>", _hold_para, s)
+
+        # 去掉 think / reasoning 块
+        s = _re.sub(r"(?is)<think>.*?</think>", "", s)
+        s = _re.sub(r"(?is)<reasoning>.*?</reasoning>", "", s)
+        # 去掉「译文：」前缀（仅文首）
+        s = _re.sub(r"^(?:译文|翻译|Translation)\s*[:：]\s*", "", s.strip())
+
+        # 若整段被包在【待译原文】...【待译原文结束】里，只留中间正文
+        wrapped = _re.search(
+            r"[【\[]\s*待译原文\s*[】\]]\s*(.*?)\s*[【\[]\s*待译原文结束\s*[】\]]",
+            s,
+            flags=_re.DOTALL | _re.IGNORECASE,
+        )
+        if wrapped:
+            s = wrapped.group(1)
+
+        marker_alt = "|".join(cls._PROMPT_MARKER_NAMES)
+        # 单独成行的提示标记 → 删掉该行，用一个换行占位，避免把两段粘成一段
+        s = _re.sub(
+            rf"(?m)^[ \t]*[【\[]\s*(?:{marker_alt})\s*[】\]][ \t]*\r?\n?",
+            "\n",
+            s,
+            flags=_re.IGNORECASE,
+        )
+        s = _re.sub(
+            rf"(?m)^[ \t]*(?:待译原文结束|待译原文开始|待译原文|上下文结束|原文结束|译文结束)[ \t]*\r?\n?",
+            "\n",
+            s,
+        )
+        # 行内残留的【…】提示标记直接删除
+        s = _re.sub(
+            rf"[【\[]\s*(?:{marker_alt})\s*[】\]]",
+            "",
+            s,
+            flags=_re.IGNORECASE,
+        )
+
+        # 恢复分段标记
+        for key, raw in para_holders.items():
+            s = s.replace(key, raw)
+
+        # 多余空行压成段间分隔（保留 \n\n），不要抹掉分段
+        s = _re.sub(r"[ \t]+\n", "\n", s)
+        s = _re.sub(r"\n{3,}", "\n\n", s)
+        return s.strip()
+
+    @classmethod
+    def _clean_translation_fields(cls, result: dict, *keys: str) -> dict:
+        """清洗 JSON 结果里的译文字段，去掉提示标记，保留分段。"""
+        if not isinstance(result, dict):
+            return result
+        for key in keys:
+            if key in result and isinstance(result.get(key), str):
+                result[key] = cls._strip_translation_wrappers(result[key])
+        return result
 
     async def literary_translate(
         self,
@@ -555,25 +741,66 @@ Output only the translated text, no additional comments."""
         neighbor_context: Optional[str] = None,
     ) -> str:
         """翻译 - 第一步：初译"""
+        is_local = self._is_local_client()
+        scale = self._local_scale() if is_local else "large"
+        # 小模型用短提示防幻觉；14B+ 用完整文学提示以提升质量
+        draft_mode = is_local and scale == "small"
         messages = self.build_literary_translation_prompt(
-            text, source_lang, target_lang, literary_type, reference_content
+            text, source_lang, target_lang, literary_type, reference_content,
+            draft_mode=draft_mode,
         )
-        if guidance and guidance.strip():
+        if is_local and not draft_mode:
+            messages[0]["content"] += (
+                "\n\n## 本地模型额外约束\n"
+                "- 只翻译【待译原文】，禁止翻译上下文、禁止补全情节\n"
+                "- 不要输出【待译原文】【待译原文结束】等任何提示标记\n"
+                "- 不要输出思考过程；输出只能是译文正文"
+            )
+
+        if guidance and guidance.strip() and not draft_mode:
+            guide = guidance.strip()
+            # 中等本地模型适当截断，避免占满上下文
+            if is_local and scale == "medium" and len(guide) > 2500:
+                guide = guide[:2500] + "…"
             messages[0]["content"] += (
                 "\n\n## 翻译附加设定（翻译风格/故事档案，必须遵守，不要写进译文）\n"
                 "翻译风格 = 贴合原文 + 译者习惯。先复现原文，再把习惯自然融入；冲突时以原文为准。\n"
-                + guidance.strip()
+                + guide
             )
+        elif guidance and guidance.strip() and draft_mode:
+            # 小模型只保留极短术语约束，避免故事档案诱发扩写
+            brief = guidance.strip()
+            if len(brief) > 800:
+                brief = brief[:800] + "…"
+            messages[0]["content"] += f"\n\n译名约束（勿扩写情节）：\n{brief}"
+
         if neighbor_context and neighbor_context.strip():
-            messages[1]["content"] = neighbor_context.strip() + "\n\n" + messages[1]["content"]
-        temp = 0.4 if self.is_professional_type(literary_type) else 0.7
+            # 上下文放在待译原文之后，并明确禁止翻译，避免小模型串段
+            note = neighbor_context.strip()
+            if is_local and scale == "small" and len(note) > 600:
+                note = note[:600] + "…"
+            messages[1]["content"] += (
+                "\n\n【上下文·禁止翻译·禁止写入译文】\n"
+                + note
+                + "\n【上下文结束】"
+            )
+
+        if is_local:
+            if self.is_professional_type(literary_type):
+                temp = 0.25 if scale == "small" else 0.35
+            else:
+                # 小模型偏低温更稳；中大模型略升温换流畅度与文采
+                temp = {"small": 0.25, "medium": 0.45, "large": 0.55}.get(scale, 0.4)
+        else:
+            temp = 0.4 if self.is_professional_type(literary_type) else 0.7
+
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             **self._sampling_kwargs(temperature=temp),
         )
-        return response.choices[0].message.content.strip()
-
+        content = (response.choices[0].message.content or "").strip()
+        return self._strip_translation_wrappers(content)
     async def literary_verify(
         self,
         source_text: str,
@@ -697,10 +924,10 @@ Output only the translated text, no additional comments."""
         import json
         try:
             result = json.loads(response.choices[0].message.content)
-            return result
+            return self._clean_translation_fields(result, "verified_translation")
         except:
             return {
-                "verified_translation": translated_text,
+                "verified_translation": self._strip_translation_wrappers(translated_text),
                 "accuracy_analysis": "校验完成",
                 "beauty_sound_score": 7.0,
                 "beauty_sound_comment": "基础达标",
@@ -818,10 +1045,10 @@ Output only the translated text, no additional comments."""
         import json
         try:
             result = json.loads(response.choices[0].message.content)
-            return result
+            return self._clean_translation_fields(result, "revised_translation")
         except:
             return {
-                "revised_translation": verified_translation,
+                "revised_translation": self._strip_translation_wrappers(verified_translation),
                 "revision_summary": "基于校验反馈进行微调",
                 "key_improvements": [],
                 "beauty_sound_enhancement": "保持原有水平",
@@ -945,6 +1172,9 @@ Output only the translated text, no additional comments."""
 ### 4. 完美准确
 - 零错误：无错译、漏译、增译
 - 细节到位：标点、格式、特殊内容处理得当
+
+### 5. 初步勘误意识
+- 留意常识硬伤、行业惯例误用、习语/固定搭配误译
 {marker_rule}
 
 ## 输出格式
@@ -993,6 +1223,9 @@ Output only the translated text, no additional comments."""
 - 毫无翻译腔，读起来像目标语言的原创
 - 符合目标语言同类文体的表达习惯
 - 消除残留的生硬表达
+
+### 6. 初步勘误意识（为后续整体勘误打底）
+- 留意明显的常识硬伤、文化错位、习语误译，能改则改
 {marker_rule}
 
 ## 输出格式
@@ -1030,16 +1263,121 @@ Output only the translated text, no additional comments."""
         import json
         try:
             result = json.loads(response.choices[0].message.content)
-            return result
+            return self._clean_translation_fields(result, "final_translation")
         except:
             return {
-                "final_translation": revised_translation,
+                "final_translation": self._strip_translation_wrappers(revised_translation),
                 "final_assessment": "译文质量良好，达到基本出版标准",
                 "beauty_sound_final": "音韵和谐",
                 "beauty_word_final": "用词精准",
                 "beauty_meaning_final": "意境传达到位",
                 "publishing_readiness": "基本具备出版条件",
                 "translator_note": ""
+            }
+
+    async def literary_holistic_errata(
+        self,
+        source_text: str,
+        draft_translation: str,
+        source_lang: str,
+        target_lang: str,
+        literary_type: str = "general",
+        guidance: Optional[str] = None,
+        paragraph_count: Optional[int] = None,
+    ) -> dict:
+        """定稿后的整体勘误：以全文视角订正常识、文化、习俗用语等错误。"""
+        source_name = self.get_language_name(source_lang)
+        target_name = self.get_language_name(target_lang)
+        lit_type_name = self.get_literary_type_name(literary_type)
+        marker_rule = ""
+        if paragraph_count and paragraph_count >= 1:
+            marker_rule = f"""
+
+## 段落对齐（必须遵守）
+- 输入已用 <<<PARA_0>>> ... <<<PARA_{paragraph_count - 1}>>> 标记分段
+- corrected_translation 必须保留全部 {paragraph_count} 个标记，顺序与编号不得改动
+- 不得合并、拆分或增删段落；每个标记后只放该段订正后的译文"""
+
+        system_prompt = f"""你是资深{lit_type_name}审校与勘误专家。原文为{source_name}，译文为{target_name}。
+请以**整体视角**审读已定稿译文，对照原文做订正，重点抓「分段翻译容易漏掉」的问题。
+
+## 勘误重点（按优先级）
+
+### 1. 常识与事实
+- 明显违背常识、时代背景、地理/历史/科学事实的表述
+- 逻辑矛盾、前后情节/数据不一致
+- 数量、称谓辈分、时间线硬伤
+
+### 2. 文化与习俗
+- 文化意象、典故、礼仪、禁忌被误译或直译致误
+- 不符合目标语文化习惯的生硬对应
+- 原文文化色彩被无故抹平或过度改写
+
+### 3. 习俗用语与地道表达
+- 成语、谚语、俚语、口头禅译错或译僵
+- 敬语/谦语/称谓系统错乱
+- 残留翻译腔、字面硬译、搭配不当
+
+### 4. 全书一致性
+- 人名、地名、专名、术语前后不一
+- 语气、语体在相邻段落间无故跳变
+
+## 修改原则
+- 有错必改，无错不改；不要为了「更华丽」而重写
+- 订正后仍须忠实原文信息与风格
+- 不要输出思考过程；不要添加译者说明进正文
+- 严禁输出【待译原文】等提示标记
+{marker_rule}
+
+## 输出格式（JSON）
+{{
+  "corrected_translation": "订正后的全文译文（保留全部 <<<PARA_N>>> 标记）",
+  "errata": [
+    {{"category": "常识|文化|习俗用语|一致性|其他", "issue": "问题简述", "fix": "如何改正"}}
+  ],
+  "summary": "本次勘误一句话总结"
+}}
+
+若几乎无可改之处，errata 可为 []，corrected_translation 仍返回润色后的稳妥文本（可与输入相同）。"""
+
+        keep_hint = (
+            f"请完成整体勘误，并严格保留全部 {paragraph_count} 个 <<<PARA_N>>> 段落标记。"
+            if paragraph_count and paragraph_count >= 1
+            else "请完成整体勘误，保持段落结构不变。"
+        )
+        messages = [
+            {"role": "system", "content": self._apply_story_guidance(system_prompt, guidance)},
+            {
+                "role": "user",
+                "content": (
+                    f"【完整原文】({source_name}):\n{source_text}\n\n"
+                    f"【待勘误定稿译文】({target_name}):\n{draft_translation}\n\n"
+                    f"{keep_hint}"
+                ),
+            },
+        ]
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            **self._sampling_kwargs(temperature=0.25),
+        )
+
+        import json
+        try:
+            result = json.loads(response.choices[0].message.content or "{}")
+            cleaned = self._clean_translation_fields(result, "corrected_translation")
+            if not (cleaned.get("corrected_translation") or "").strip():
+                cleaned["corrected_translation"] = self._strip_translation_wrappers(draft_translation)
+            if not isinstance(cleaned.get("errata"), list):
+                cleaned["errata"] = []
+            return cleaned
+        except Exception:
+            return {
+                "corrected_translation": self._strip_translation_wrappers(draft_translation),
+                "errata": [],
+                "summary": "勘误解析失败，保留原定稿",
             }
 
     async def literary_translate_paragraph(
@@ -1083,6 +1421,14 @@ Output only the translated text, no additional comments."""
             guidance=guidance,
         )
         step4 = step4_result.get("final_translation", step3)
+
+        # 定稿后整体勘误（单段也做常识/文化/习俗用语订正）
+        errata_result = await self.literary_holistic_errata(
+            paragraph, step4, source_lang, target_lang, literary_type,
+            guidance=guidance,
+            paragraph_count=1,
+        )
+        step4 = errata_result.get("corrected_translation", step4) or step4
         
         return {
             "step1_translation": step1,
@@ -1096,6 +1442,7 @@ Output only the translated text, no additional comments."""
             },
             "final_assessment": step4_result.get("final_assessment", ""),
             "translator_note": step4_result.get("translator_note", ""),
+            "errata_summary": errata_result.get("summary", ""),
         }
 
     async def extract_professional_terms(
@@ -1184,14 +1531,163 @@ Output only the translated text, no additional comments."""
 
 # 全局客户端实例（延迟初始化）
 _ai_client_instance: Optional[AIClient] = None
+_draft_client_instance: Optional[AIClient] = None
+
+COLLAB_MODES = ("online", "local", "collab")
+_collab_mode_override: ContextVar[Optional[str]] = ContextVar("collab_mode_override", default=None)
 
 
-def get_ai_client() -> AIClient:
-    """获取 AI 客户端实例（延迟初始化）"""
-    global _ai_client_instance
+def normalize_collab_mode(mode: Optional[str], default: str = "online") -> str:
+    value = (mode or "").strip()
+    if value in COLLAB_MODES:
+        return value
+    return default if default in COLLAB_MODES else "online"
+
+
+def push_collab_mode(mode: Optional[str]):
+    """在当前异步任务上下文中临时指定翻译模式。"""
+    value = (mode or "").strip()
+    return _collab_mode_override.set(value if value in COLLAB_MODES else None)
+
+
+def reset_collab_mode(token) -> None:
+    try:
+        _collab_mode_override.reset(token)
+    except Exception:
+        pass
+
+
+def _read_ai_config_row():
+    """读取 ai_config 单行并脱离会话，避免关闭连接后访问失败。"""
+    try:
+        from app.database import SessionLocal
+        from app.models.models import AIConfig
+        db = SessionLocal()
+        try:
+            cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
+            if not cfg:
+                return None
+            db.expunge(cfg)
+            return cfg
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def get_collab_mode() -> str:
+    """online=全部线上，local=全部本地，collab=本地预译+线上润色。
+
+    优先使用任务上下文中的模式，其次系统默认配置。
+    """
+    override = _collab_mode_override.get()
+    if override in COLLAB_MODES:
+        return override
+    cfg = _read_ai_config_row()
+    mode = (getattr(cfg, "collab_mode", None) or "online") if cfg else "online"
+    return normalize_collab_mode(mode)
+
+
+def draft_fallback_enabled() -> bool:
+    cfg = _read_ai_config_row()
+    if not cfg:
+        return True
+    value = getattr(cfg, "draft_fallback", None)
+    return True if value is None else bool(value)
+
+
+def build_draft_override() -> dict:
+    """本地草稿模型配置。未单独保存时回落到 Ollama 默认值。"""
+    settings = get_settings()
+    provider = "ollama"
+    model = settings.ollama_model or AIClient.PROVIDER_DEFAULT_MODELS["ollama"]
+    base_url = settings.ollama_base_url or AIClient.PROVIDER_BASE_URLS["ollama"]
+    api_key = "ollama"
+    # 本地默认：更长超时、足够输出长度；不强制继承线上 temperature
+    sampling = {
+        "temperature": None,
+        "max_tokens": max(int(settings.ai_max_tokens or 4096), 6144),
+        "top_p": None,
+        "frequency_penalty": None,
+        "presence_penalty": None,
+        "timeout_seconds": int(getattr(settings, "ollama_timeout_seconds", None) or 300),
+    }
+    cfg = _read_ai_config_row()
+    if cfg:
+        if (cfg.draft_provider or "").strip():
+            provider = cfg.draft_provider.strip()
+        if (cfg.draft_model or "").strip():
+            model = cfg.draft_model.strip()
+        if (cfg.draft_base_url or "").strip():
+            base_url = cfg.draft_base_url.strip()
+        if (cfg.draft_api_key or "").strip():
+            api_key = cfg.draft_api_key.strip()
+        # max_tokens / timeout 可沿用全局配置，但给本地设下限，避免过短截断
+        if cfg.max_tokens is not None:
+            sampling["max_tokens"] = max(int(cfg.max_tokens), 4096)
+        if cfg.timeout_seconds is not None:
+            sampling["timeout_seconds"] = max(int(cfg.timeout_seconds), 180)
+        # 本地一般不套用线上的 frequency/presence penalty（部分小模型更不稳定）
+        if provider != "ollama":
+            sampling["top_p"] = cfg.top_p
+            sampling["frequency_penalty"] = cfg.frequency_penalty
+            sampling["presence_penalty"] = cfg.presence_penalty
+    if provider == "ollama" and not str(api_key or "").strip():
+        api_key = "ollama"
+    if not (base_url or "").strip():
+        base_url = AIClient.PROVIDER_BASE_URLS.get(provider, "")
+    if not (model or "").strip():
+        model = AIClient.PROVIDER_DEFAULT_MODELS.get(provider, "")
+    return {
+        "provider": provider,
+        "api_key": api_key,
+        "model": model,
+        "base_url": base_url,
+        **sampling,
+    }
+
+
+def get_ai_client(role: str = "primary") -> AIClient:
+    """获取 AI 客户端。role=primary 为线上主配置，role=draft 为本地草稿模型。"""
+    global _ai_client_instance, _draft_client_instance
+    if role == "draft":
+        if _draft_client_instance is None:
+            _draft_client_instance = AIClient(override=build_draft_override())
+        return _draft_client_instance
     if _ai_client_instance is None:
         _ai_client_instance = AIClient()
     return _ai_client_instance
+
+
+def client_for_step(step: int) -> tuple[AIClient, str]:
+    """按协同模式为翻译步骤选择客户端。返回 (client, role)。"""
+    mode = get_collab_mode()
+    if mode == "local" or (mode == "collab" and step == 1):
+        return get_ai_client("draft"), "draft"
+    return get_ai_client("primary"), "online"
+
+
+async def call_for_step(step: int, fn):
+    """执行某一步的模型调用。草稿失败且允许回退时改用线上模型。"""
+    client, role = client_for_step(step)
+    try:
+        return await fn(client)
+    except Exception as exc:
+        if role == "draft" and draft_fallback_enabled():
+            _safe_print(f"[AIClient] 本地模型步骤 {step} 失败，回退线上模型: {exc}")
+            return await fn(get_ai_client("primary"))
+        raise
+
+
+def reset_ai_clients() -> None:
+    """清空缓存，使下次请求重新读取配置。"""
+    global _ai_client_instance, _draft_client_instance
+    _ai_client_instance = None
+    _draft_client_instance = None
+    try:
+        ai_client._client = None
+    except Exception:
+        pass
 
 
 # 向后兼容 - 使用属性访问器实现真正的延迟加载

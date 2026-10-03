@@ -142,6 +142,12 @@ export const systemApi = {
     frequency_penalty?: number
     presence_penalty?: number
     timeout_seconds?: number
+    collab_mode?: string
+    draft_provider?: string
+    draft_api_key?: string
+    draft_model?: string
+    draft_base_url?: string
+    draft_fallback?: boolean
   }) => api.put('/system/ai-config', data),
   testAIConfig: (data: {
     provider: string
@@ -150,6 +156,7 @@ export const systemApi = {
     base_url?: string
     temperature?: number
     timeout_seconds?: number
+    use_draft_key?: boolean
   }) => api.post('/system/ai-config/test', data),
 }
 
@@ -196,6 +203,7 @@ export const literaryApi = {
   // 创建翻译任务
   createTranslation: (data: {
     title?: string
+    group_name?: string
     source_text: string
     source_lang: string
     target_lang: string
@@ -203,21 +211,59 @@ export const literaryApi = {
     reference_document_ids?: number[]
     user_requirements?: string
     style_agent_id?: number
+    collab_mode?: 'online' | 'local' | 'collab' | string
   }) => api.post('/literary/translations', data),
   
-  // 获取翻译任务列表
-  listTranslations: (params?: { skip?: number; limit?: number; status?: string }) => 
-    api.get('/literary/translations', { params }),
+  // 获取翻译任务分页列表
+  listTranslations: (params?: {
+    skip?: number
+    limit?: number
+    status?: string
+    category?: string
+    group_name?: string
+    q?: string
+  }) => api.get<{ items: any[]; total: number; skip: number; limit: number }>('/literary/translations', { params }),
+
+  // 获取翻译文档分组
+  listTranslationGroups: (params?: { category?: string }) =>
+    api.get<Array<{ id?: number | null; name: string; count: number; sort_order?: number }>>(
+      '/literary/translations/groups',
+      { params }
+    ),
+
+  createTranslationGroup: (name: string) =>
+    api.post<{ id: number; name: string; count: number; sort_order: number }>(
+      '/literary/translations/groups',
+      { name }
+    ),
+
+  renameTranslationGroup: (groupId: number, name: string) =>
+    api.put<{ id: number; name: string; count: number; sort_order: number }>(
+      `/literary/translations/groups/${groupId}`,
+      { name }
+    ),
+
+  deleteTranslationGroup: (groupId: number, clearDocs = true) =>
+    api.delete<{ message: string; cleared_docs: number }>(
+      `/literary/translations/groups/${groupId}`,
+      { params: { clear_docs: clearDocs } }
+    ),
+
+  bulkAssignTranslationGroup: (translationIds: number[], groupName: string | null) =>
+    api.post<{ message: string; updated: number; group_name: string | null }>(
+      '/literary/translations/groups/bulk-assign',
+      { translation_ids: translationIds, group_name: groupName }
+    ),
   
   // 获取翻译任务详情。浏览长文时 includeParagraphs 与 includeSource 都传 false，再分页拉段落。
   getTranslation: (id: number, includeParagraphs?: boolean, includeSource = true) =>
     api.get(`/literary/translations/${id}`, {
       params: { include_paragraphs: includeParagraphs, include_source: includeSource },
-    }),
-  
+    }),  
   // 更新翻译任务（改）
   updateTranslation: (id: number, data: {
     title?: string
+    group_name?: string | null
     source_text?: string
     final_translation?: string
     status?: string
@@ -231,13 +277,18 @@ export const literaryApi = {
   // ===== 翻译流程 =====
 
   // 启动四步翻译流程（后台执行，立即返回）
-  startWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/start`),
+  startWorkflow: (id: number, data?: { collab_mode?: 'online' | 'local' | 'collab' | string }) =>
+    api.post(`/literary/translations/${id}/workflow/start`, data || {}),
 
   // 终止四步翻译流程
   stopWorkflow: (id: number) => api.post(`/literary/translations/${id}/workflow/stop`),
 
   // 批量启动翻译流程（按顺序依次处理）
-  startBatchWorkflow: (ids: number[]) => api.post('/literary/translations/batch/workflow/start', { translation_ids: ids }),
+  startBatchWorkflow: (ids: number[], collab_mode?: 'online' | 'local' | 'collab' | string) =>
+    api.post('/literary/translations/batch/workflow/start', {
+      translation_ids: ids,
+      ...(collab_mode ? { collab_mode } : {}),
+    }),
 
   // 获取工作流状态（轮询用）
   getWorkflowStatus: (id: number) => api.get(`/literary/translations/${id}/workflow`),

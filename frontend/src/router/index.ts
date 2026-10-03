@@ -17,6 +17,7 @@ const router = createRouter({
       component: LiteraryResultView
     },
     // 旧独立路由：回到主界面，避免书签落到空白页
+    { path: '/documents', redirect: '/' },
     { path: '/terms', redirect: '/' },
     { path: '/literary/:id/story', redirect: '/' },
   ],

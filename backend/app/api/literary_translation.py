@@ -3,11 +3,13 @@
 支持全文翻译、四步翻译流程、RAG参考、对照编辑
 """
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query, Body
 from sqlalchemy import func
 from sqlalchemy.orm import Session, defer, load_only, noload
 from sqlalchemy.exc import OperationalError
 from typing import List, Optional, AsyncGenerator
+from contextvars import ContextVar
+from pydantic import BaseModel
 import json
 import os
 import io
@@ -19,7 +21,9 @@ import traceback
 from app.database import get_db, SessionLocal
 from app.schemas.schemas import (
     LiteraryTranslationCreate, LiteraryTranslationResponse,
-    LiteraryTranslationListItem, LiteraryParagraphResponse, LiteraryParagraphPage,
+    LiteraryTranslationListItem, LiteraryTranslationListPage, TranslationGroupItem,
+    TranslationGroupCreate, TranslationGroupRename, TranslationGroupBulkAssign,
+    LiteraryParagraphResponse, LiteraryParagraphPage,
     ParagraphUpdateRequest, LiteraryTranslationUpdate, StoryProfileUpdate,
     ReferenceDocumentCreate, ReferenceDocumentResponse,
     ReferenceDocumentListItem, ReferenceDocumentUpdate,
@@ -29,11 +33,20 @@ from app.schemas.schemas import (
     TranslationTermSummaryResponse
 )
 from app.models.models import (
-    LiteraryTranslation, LiteraryParagraph,
+    LiteraryTranslation, LiteraryParagraph, DocumentGroup,
     ReferenceDocument, LiteraryTranslationStatus,
     ProfessionalTerm, TranslationTermSummary
 )
-from app.core.ai_client import get_ai_client
+from app.core.ai_client import (
+    AIClient,
+    get_ai_client,
+    call_for_step,
+    client_for_step,
+    normalize_collab_mode,
+    push_collab_mode,
+    reset_collab_mode,
+    get_collab_mode,
+)
 from app.services.story_profile import (
     STORY_BATCH,
     format_digest,
@@ -78,7 +91,45 @@ def _validate_style_agent_id(db: Session, style_agent_id: Optional[int]) -> None
 class WorkflowCancelled(Exception):
     pass
 
-CANCELLED_TRANSLATIONS: set[int] = set()
+# 每任务一个递增代数：终止/重开都会 +1，旧后台协程发现代数不一致即退出，避免卡在旧译文上
+WORKFLOW_GENERATION: dict[int, int] = {}
+_current_workflow_generation: ContextVar[Optional[int]] = ContextVar(
+    "_current_workflow_generation", default=None
+)
+
+
+def _bump_workflow_generation(translation_id: int) -> int:
+    n = WORKFLOW_GENERATION.get(translation_id, 0) + 1
+    WORKFLOW_GENERATION[translation_id] = n
+    return n
+
+
+def _ensure_workflow_active(translation_id: int) -> None:
+    """当前协程若已被终止或被新一轮启动顶替，则中断。"""
+    gen = _current_workflow_generation.get()
+    if gen is None:
+        return
+    if WORKFLOW_GENERATION.get(translation_id) != gen:
+        raise WorkflowCancelled()
+
+
+def _para_has_text(value: Optional[str]) -> bool:
+    return bool((value or "").strip())
+
+
+def _detect_resume_step(paragraphs: list) -> int:
+    """根据段落已有结果决定从哪一步续跑：有译文保留，从未完成处继续。"""
+    if not paragraphs:
+        return 1
+    if any(not _para_has_text(getattr(p, "step1_translation", None)) for p in paragraphs):
+        return 1
+    if any(not _para_has_text(getattr(p, "step2_verification", None)) for p in paragraphs):
+        return 2
+    if any(not _para_has_text(getattr(p, "step3_revision", None)) for p in paragraphs):
+        return 3
+    if any(not _para_has_text(getattr(p, "step4_finalization", None)) for p in paragraphs):
+        return 4
+    return 4
 
 # ============================================================
 # 参考文档管理
@@ -368,6 +419,19 @@ def get_reference_and_requirements(translation: LiteraryTranslation, db: Session
     return ref or ""
 
 
+def _default_system_collab_mode() -> str:
+    try:
+        return normalize_collab_mode(get_collab_mode())
+    except Exception:
+        return "online"
+
+
+def _resolve_task_collab_mode(mode: Optional[str] = None) -> str:
+    if mode and str(mode).strip():
+        return normalize_collab_mode(str(mode).strip())
+    return _default_system_collab_mode()
+
+
 @router.post("/translations", response_model=LiteraryTranslationResponse)
 async def create_literary_translation(
     request: LiteraryTranslationCreate,
@@ -377,6 +441,7 @@ async def create_literary_translation(
     _validate_style_agent_id(db, request.style_agent_id)
     translation = LiteraryTranslation(
         title=request.title,
+        group_name=_normalize_group_name(request.group_name),
         source_text=request.source_text,
         source_lang=request.source_lang,
         target_lang=request.target_lang,
@@ -384,10 +449,12 @@ async def create_literary_translation(
         reference_document_ids=request.reference_document_ids or [],
         user_requirements=request.user_requirements,
         style_agent_id=request.style_agent_id,
+        collab_mode=_resolve_task_collab_mode(request.collab_mode),
         status=LiteraryTranslationStatus.PENDING,
         current_step=1
     )
     db.add(translation)
+    _ensure_document_group(db, translation.group_name)
     db.commit()
     db.refresh(translation)
     
@@ -406,44 +473,237 @@ async def create_literary_translation(
     return translation
 
 
-@router.get("/translations", response_model=List[LiteraryTranslationListItem])
+_LITERARY_CATEGORY_TYPES = ("poetry", "prose", "novel", "drama", "general")
+
+
+def _normalize_group_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _ensure_document_group(db: Session, name: Optional[str]) -> Optional[DocumentGroup]:
+    """任务写入 group_name 时同步写入分组表，保证空组也可管理。"""
+    normalized = _normalize_group_name(name)
+    if not normalized:
+        return None
+    existing = db.query(DocumentGroup).filter(DocumentGroup.name == normalized).first()
+    if existing:
+        return existing
+    group = DocumentGroup(name=normalized, sort_order=0)
+    db.add(group)
+    db.flush()
+    return group
+
+
+def _apply_translation_list_filters(
+    query,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    group_name: Optional[str] = None,
+    q: Optional[str] = None,
+):
+    if status:
+        query = query.filter(LiteraryTranslation.status == status)
+    if category == "literary":
+        query = query.filter(LiteraryTranslation.literary_type.in_(_LITERARY_CATEGORY_TYPES))
+    elif category == "professional":
+        query = query.filter(~LiteraryTranslation.literary_type.in_(_LITERARY_CATEGORY_TYPES))
+    if group_name == "__ungrouped__":
+        query = query.filter(
+            (LiteraryTranslation.group_name.is_(None)) | (LiteraryTranslation.group_name == "")
+        )
+    elif group_name:
+        query = query.filter(LiteraryTranslation.group_name == group_name)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        query = query.filter(LiteraryTranslation.title.ilike(like))
+    return query
+
+
+@router.get("/translations", response_model=LiteraryTranslationListPage)
 async def list_literary_translations(
     skip: int = 0,
-    limit: int = 50,
+    limit: int = 20,
     status: Optional[str] = None,
+    category: Optional[str] = Query(None, description="all|literary|professional"),
+    group_name: Optional[str] = Query(
+        None,
+        description="分组名；传 __ungrouped__ 表示未分组",
+    ),
+    q: Optional[str] = Query(None, description="标题模糊搜索"),
     db: Session = Depends(get_db)
 ):
-    """获取文学翻译任务列表"""
+    """获取文学翻译任务分页列表"""
     try:
         query = db.query(LiteraryTranslation).options(
             noload(LiteraryTranslation.paragraphs),
             load_only(
                 LiteraryTranslation.id,
                 LiteraryTranslation.title,
+                LiteraryTranslation.group_name,
                 LiteraryTranslation.status,
                 LiteraryTranslation.current_step,
                 LiteraryTranslation.error_message,
                 LiteraryTranslation.source_lang,
                 LiteraryTranslation.target_lang,
                 LiteraryTranslation.literary_type,
+                LiteraryTranslation.collab_mode,
                 LiteraryTranslation.beauty_sound_score,
                 LiteraryTranslation.beauty_word_score,
                 LiteraryTranslation.beauty_meaning_score,
                 LiteraryTranslation.created_at,
             ),
         )
-        if status:
-            query = query.filter(LiteraryTranslation.status == status)
-        query = query.order_by(LiteraryTranslation.created_at.desc())
-        return query.offset(skip).limit(limit).all()
+        query = _apply_translation_list_filters(
+            query,
+            status=status,
+            category=category if category and category != "all" else None,
+            group_name=group_name,
+            q=q,
+        )
+        total = query.count()
+        items = query.order_by(LiteraryTranslation.created_at.desc()).offset(skip).limit(limit).all()
+        return LiteraryTranslationListPage(items=items, total=total, skip=skip, limit=limit)
     except OperationalError as e:
         err_msg = str(getattr(e, "orig", e))
         if "Unknown column" in err_msg:
             raise HTTPException(
                 status_code=503,
-                detail="Database schema is outdated. From project root run: mysql -u root -p aitranslator < backend/migrations/schema_update_literary_translations.sql"
+                detail="Database schema is outdated. From project root run: mysql -u root -p aitranslator < backend/migrations/add_group_name.sql"
             )
         raise
+
+
+@router.get("/translations/groups", response_model=List[TranslationGroupItem])
+async def list_translation_groups(
+    category: Optional[str] = Query(None, description="all|literary|professional"),
+    db: Session = Depends(get_db),
+):
+    """获取自定义分组列表（含文档数量；空组也会返回）"""
+    count_query = db.query(
+        LiteraryTranslation.group_name,
+        func.count(LiteraryTranslation.id),
+    )
+    if category == "literary":
+        count_query = count_query.filter(LiteraryTranslation.literary_type.in_(_LITERARY_CATEGORY_TYPES))
+    elif category == "professional":
+        count_query = count_query.filter(~LiteraryTranslation.literary_type.in_(_LITERARY_CATEGORY_TYPES))
+    count_map = {
+        ((name or "").strip() or ""): count
+        for name, count in count_query.group_by(LiteraryTranslation.group_name).all()
+    }
+
+    # 同步已有任务分组名进分组表（兼容升级前数据）
+    for name in list(count_map.keys()):
+        if name:
+            _ensure_document_group(db, name)
+    db.commit()
+
+    groups = db.query(DocumentGroup).order_by(DocumentGroup.sort_order.asc(), DocumentGroup.name.asc()).all()
+    items: List[TranslationGroupItem] = [
+        TranslationGroupItem(
+            id=g.id,
+            name=g.name,
+            count=count_map.get(g.name, 0),
+            sort_order=g.sort_order or 0,
+        )
+        for g in groups
+    ]
+    ungrouped = count_map.get("", 0)
+    if ungrouped:
+        items.append(TranslationGroupItem(id=None, name="", count=ungrouped, sort_order=10_000))
+    return items
+
+
+@router.post("/translations/groups", response_model=TranslationGroupItem)
+async def create_translation_group(
+    request: TranslationGroupCreate,
+    db: Session = Depends(get_db),
+):
+    """新建自定义分组（可为空组）"""
+    name = _normalize_group_name(request.name)
+    if not name:
+        raise HTTPException(status_code=400, detail="分组名称不能为空")
+    exists = db.query(DocumentGroup).filter(DocumentGroup.name == name).first()
+    if exists:
+        raise HTTPException(status_code=400, detail="分组已存在")
+    group = DocumentGroup(name=name, sort_order=0)
+    db.add(group)
+    db.commit()
+    db.refresh(group)
+    return TranslationGroupItem(id=group.id, name=group.name, count=0, sort_order=group.sort_order or 0)
+
+
+@router.put("/translations/groups/{group_id}", response_model=TranslationGroupItem)
+async def rename_translation_group(
+    group_id: int,
+    request: TranslationGroupRename,
+    db: Session = Depends(get_db),
+):
+    """重命名分组，并同步更新该组下所有文档"""
+    group = db.query(DocumentGroup).filter(DocumentGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="分组不存在")
+    new_name = _normalize_group_name(request.name)
+    if not new_name:
+        raise HTTPException(status_code=400, detail="分组名称不能为空")
+    if new_name != group.name:
+        conflict = db.query(DocumentGroup).filter(
+            DocumentGroup.name == new_name,
+            DocumentGroup.id != group_id,
+        ).first()
+        if conflict:
+            raise HTTPException(status_code=400, detail="目标分组名已存在")
+        old_name = group.name
+        group.name = new_name
+        db.query(LiteraryTranslation).filter(LiteraryTranslation.group_name == old_name).update(
+            {LiteraryTranslation.group_name: new_name},
+            synchronize_session=False,
+        )
+        db.commit()
+        db.refresh(group)
+    count = db.query(func.count(LiteraryTranslation.id)).filter(
+        LiteraryTranslation.group_name == group.name
+    ).scalar() or 0
+    return TranslationGroupItem(id=group.id, name=group.name, count=count, sort_order=group.sort_order or 0)
+
+
+@router.delete("/translations/groups/{group_id}")
+async def delete_translation_group(
+    group_id: int,
+    clear_docs: bool = Query(True, description="是否把该组文档改为未分组"),
+    db: Session = Depends(get_db),
+):
+    """删除自定义分组"""
+    group = db.query(DocumentGroup).filter(DocumentGroup.id == group_id).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="分组不存在")
+    affected = 0
+    if clear_docs:
+        affected = db.query(LiteraryTranslation).filter(
+            LiteraryTranslation.group_name == group.name
+        ).update({LiteraryTranslation.group_name: None}, synchronize_session=False)
+    db.delete(group)
+    db.commit()
+    return {"message": "分组已删除", "cleared_docs": affected}
+
+
+@router.post("/translations/groups/bulk-assign")
+async def bulk_assign_translation_group(
+    request: TranslationGroupBulkAssign,
+    db: Session = Depends(get_db),
+):
+    """批量设置文档分组"""
+    group_name = _normalize_group_name(request.group_name)
+    if group_name:
+        _ensure_document_group(db, group_name)
+    updated = db.query(LiteraryTranslation).filter(
+        LiteraryTranslation.id.in_(request.translation_ids)
+    ).update({LiteraryTranslation.group_name: group_name}, synchronize_session=False)
+    db.commit()
+    return {"message": "已更新分组", "updated": updated, "group_name": group_name}
 
 
 _HEAVY_TEXT_COLUMNS = (
@@ -498,6 +758,7 @@ async def get_literary_translation(
     return LiteraryTranslationResponse(
         id=translation.id,
         title=translation.title,
+        group_name=getattr(translation, "group_name", None),
         source_text=translation.source_text if include_source else "",
         step1_translation=translation.step1_translation if include_source else None,
         step2_verification=translation.step2_verification if include_source else None,
@@ -509,6 +770,7 @@ async def get_literary_translation(
         source_lang=translation.source_lang,
         target_lang=translation.target_lang,
         literary_type=translation.literary_type,
+        collab_mode=getattr(translation, "collab_mode", None) or "online",
         beauty_sound_score=translation.beauty_sound_score,
         beauty_word_score=translation.beauty_word_score,
         beauty_meaning_score=translation.beauty_meaning_score,
@@ -516,6 +778,7 @@ async def get_literary_translation(
         ai_model=translation.ai_model,
         reference_document_ids=translation.reference_document_ids or [],
         user_requirements=translation.user_requirements,
+        style_agent_id=getattr(translation, "style_agent_id", None),
         created_at=translation.created_at,
         updated_at=translation.updated_at,
         completed_at=translation.completed_at,
@@ -544,6 +807,10 @@ async def update_literary_translation(
     
     if request.title is not None:
         translation.title = request.title
+    fields_set = getattr(request, "model_fields_set", None) or set()
+    if "group_name" in fields_set:
+        translation.group_name = _normalize_group_name(request.group_name)
+        _ensure_document_group(db, translation.group_name)
     if request.source_text is not None:
         translation.source_text = request.source_text
     if request.final_translation is not None:
@@ -553,7 +820,6 @@ async def update_literary_translation(
         if request.status not in allowed:
             raise HTTPException(status_code=400, detail=f"status must be one of: {allowed}")
         translation.status = request.status
-    fields_set = getattr(request, "model_fields_set", None) or set()
     if "style_agent_id" in fields_set:
         _validate_style_agent_id(db, request.style_agent_id)
         translation.style_agent_id = request.style_agent_id
@@ -594,7 +860,7 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
         raise HTTPException(status_code=404, detail="Translation not found")
     translation.status = LiteraryTranslationStatus.TRANSLATING
     db.commit()
-    client = get_ai_client()
+    client, _role = client_for_step(1)
     paragraphs = db.query(LiteraryParagraph).filter(
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
@@ -606,24 +872,31 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
     full_step1 = []
     pending_story = []
     for index, para in enumerate(paragraphs):
-        if translation_id in CANCELLED_TRANSLATIONS:
-            translation.status = LiteraryTranslationStatus.FAILED
-            translation.error_message = "Cancelled by user"
-            db.commit()
-            raise WorkflowCancelled()
+        _ensure_workflow_active(translation_id)
+        # 重启续跑：已有初译的段落直接保留
+        if _para_has_text(para.step1_translation):
+            full_step1.append(para.step1_translation)
+            if not _para_has_text(para.translated_text):
+                para.translated_text = para.step1_translation
+                db.commit()
+            continue
         source_text = _sanitize_text_for_api(para.source_text or "")
         ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
         guidance = build_prompt_guidance(translation, db, include_story=story_mode)
         neighbor = neighbor_note(paragraphs, index) if story_mode else ""
-        result = await client.literary_translate(
-            source_text, translation.source_lang, translation.target_lang,
-            translation.literary_type, ref_safe,
-            guidance=guidance or None,
-            neighbor_context=neighbor or None,
+        result = await call_for_step(
+            1,
+            lambda c, text=source_text, ref=ref_safe, guide=guidance, note=neighbor: c.literary_translate(
+                text, translation.source_lang, translation.target_lang,
+                translation.literary_type, ref,
+                guidance=guide or None,
+                neighbor_context=note or None,
+            ),
         )
-        para.step1_translation = result
-        para.translated_text = result
-        full_step1.append(result)
+        cleaned = AIClient._strip_translation_wrappers(result)
+        para.step1_translation = cleaned
+        para.translated_text = cleaned
+        full_step1.append(cleaned)
         db.commit()
         if story_mode:
             pending_story.append(para)
@@ -645,7 +918,6 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
     if not translation or translation.current_step < 2:
         raise HTTPException(status_code=400, detail="Please complete step 1 first")
-    client = get_ai_client()
     paragraphs = db.query(LiteraryParagraph).filter(
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
@@ -653,17 +925,28 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
     total_sound, total_word, total_meaning = 0, 0, 0
     guidance = build_prompt_guidance(translation, db, include_story=True)
     for para in paragraphs:
-        if translation_id in CANCELLED_TRANSLATIONS:
-            translation.status = LiteraryTranslationStatus.FAILED
-            translation.error_message = "Cancelled by user"
-            db.commit()
-            raise WorkflowCancelled()
-        result = await client.literary_verify(
-            para.source_text, para.step1_translation or para.translated_text or "",
-            translation.source_lang, translation.target_lang, translation.literary_type,
-            guidance=guidance or None,
+        _ensure_workflow_active(translation_id)
+        if _para_has_text(para.step2_verification):
+            verified = para.step2_verification
+            full_step2.append(verified)
+            total_sound += para.beauty_sound_score or 7.0
+            total_word += para.beauty_word_score or 7.0
+            total_meaning += para.beauty_meaning_score or 7.0
+            if not _para_has_text(para.translated_text):
+                para.translated_text = verified
+                db.commit()
+            continue
+        result = await call_for_step(
+            2,
+            lambda c, p=para, guide=guidance: c.literary_verify(
+                p.source_text, p.step1_translation or p.translated_text or "",
+                translation.source_lang, translation.target_lang, translation.literary_type,
+                guidance=guide or None,
+            ),
         )
-        verified = result.get("verified_translation", para.step1_translation)
+        verified = AIClient._strip_translation_wrappers(
+            result.get("verified_translation", para.step1_translation) or ""
+        )
         para.step2_verification = verified
         para.translated_text = verified
         para.beauty_sound_score = result.get("beauty_sound_score", 7.0)
@@ -689,30 +972,36 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
     if not translation or translation.current_step < 3:
         raise HTTPException(status_code=400, detail="Please complete step 2 first")
-    client = get_ai_client()
     paragraphs = db.query(LiteraryParagraph).filter(
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
     full_step3 = []
     guidance = build_prompt_guidance(translation, db, include_story=True)
     for para in paragraphs:
-        if translation_id in CANCELLED_TRANSLATIONS:
-            translation.status = LiteraryTranslationStatus.FAILED
-            translation.error_message = "Cancelled by user"
-            db.commit()
-            raise WorkflowCancelled()
+        _ensure_workflow_active(translation_id)
+        if _para_has_text(para.step3_revision):
+            full_step3.append(para.step3_revision)
+            if not _para_has_text(para.translated_text):
+                para.translated_text = para.step3_revision
+                db.commit()
+            continue
         verification_analysis = {
             "issues_found": [], "suggestions": [],
             "beauty_sound_score": para.beauty_sound_score,
             "beauty_word_score": para.beauty_word_score,
             "beauty_meaning_score": para.beauty_meaning_score,
         }
-        result = await client.literary_revise(
-            para.source_text, para.step2_verification or para.translated_text or "",
-            verification_analysis, translation.source_lang, translation.target_lang, translation.literary_type,
-            guidance=guidance or None,
+        result = await call_for_step(
+            3,
+            lambda c, p=para, analysis=verification_analysis, guide=guidance: c.literary_revise(
+                p.source_text, p.step2_verification or p.translated_text or "",
+                analysis, translation.source_lang, translation.target_lang, translation.literary_type,
+                guidance=guide or None,
+            ),
         )
-        revised = result.get("revised_translation", para.step2_verification)
+        revised = AIClient._strip_translation_wrappers(
+            result.get("revised_translation", para.step2_verification) or ""
+        )
         para.step3_revision = revised
         para.translated_text = revised
         full_step3.append(revised)
@@ -728,12 +1017,31 @@ STEP4_BATCH_CHARS = 6000
 
 def _apply_finalized_parts(paragraphs: list, finalized_parts: List[str]) -> None:
     for para, text in zip(paragraphs, finalized_parts):
-        para.step4_finalization = text
-        para.translated_text = text
+        cleaned = AIClient._strip_translation_wrappers(text or "")
+        para.step4_finalization = cleaned
+        para.translated_text = cleaned
+
+
+def _split_paragraphs_into_batches(paragraphs: list, size_fn, max_chars: int = STEP4_BATCH_CHARS) -> list:
+    """按字符量把段落切成批次。"""
+    batches: list[list] = []
+    current_batch: list = []
+    current_size = 0
+    for para in paragraphs:
+        p_size = size_fn(para)
+        if current_size + p_size > max_chars and current_batch:
+            batches.append(current_batch)
+            current_batch = [para]
+            current_size = p_size
+        else:
+            current_batch.append(para)
+            current_size += p_size
+    if current_batch:
+        batches.append(current_batch)
+    return batches
 
 
 async def _finalize_paragraph_batch(
-    client,
     translation,
     batch: list,
     db: Session,
@@ -744,63 +1052,110 @@ async def _finalize_paragraph_batch(
     ]
     batch_source = _pack_marked_paragraphs([p.source_text or "" for p in batch])
     batch_revised = _pack_marked_paragraphs(fallback_texts)
-    result = await client.literary_finalize(
-        batch_source,
-        batch_revised,
-        translation.source_lang,
-        translation.target_lang,
-        translation.literary_type,
-        guidance=build_prompt_guidance(translation, db, include_story=True) or None,
-        paragraph_count=len(batch),
+    guidance = build_prompt_guidance(translation, db, include_story=True) or None
+    result = await call_for_step(
+        4,
+        lambda c, src=batch_source, revised=batch_revised, guide=guidance, count=len(batch): c.literary_finalize(
+            src,
+            revised,
+            translation.source_lang,
+            translation.target_lang,
+            translation.literary_type,
+            guidance=guide,
+            paragraph_count=count,
+        ),
     )
     finalized_text = result.get("final_translation", batch_revised)
     finalized_parts = _align_finalized_parts(finalized_text, fallback_texts)
     _apply_finalized_parts(batch, finalized_parts)
+    db.commit()
+
+
+async def _holistic_errata_batch(
+    translation,
+    batch: list,
+    db: Session,
+) -> None:
+    """对一批已定稿段落做整体勘误（常识/文化/习俗用语等）。"""
+    fallback_texts = [
+        (p.step4_finalization or p.step3_revision or p.translated_text or "") for p in batch
+    ]
+    batch_source = _pack_marked_paragraphs([p.source_text or "" for p in batch])
+    batch_draft = _pack_marked_paragraphs(fallback_texts)
+    guidance = build_prompt_guidance(translation, db, include_story=True) or None
+    result = await call_for_step(
+        4,
+        lambda c, src=batch_source, draft=batch_draft, guide=guidance, count=len(batch): c.literary_holistic_errata(
+            src,
+            draft,
+            translation.source_lang,
+            translation.target_lang,
+            translation.literary_type,
+            guidance=guide,
+            paragraph_count=count,
+        ),
+    )
+    corrected = result.get("corrected_translation", batch_draft)
+    corrected_parts = _align_finalized_parts(corrected, fallback_texts)
+    _apply_finalized_parts(batch, corrected_parts)
+    errata = result.get("errata") or []
+    summary = (result.get("summary") or "").strip()
+    if errata or summary:
+        print(
+            f"[HolisticErrata] translation={translation.id} paras="
+            f"{batch[0].paragraph_index}-{batch[-1].paragraph_index} "
+            f"fixes={len(errata)} summary={summary[:120]}"
+        )
+    db.commit()
 
 
 async def _execute_step4(translation_id: int, db: Session) -> None:
-    """执行第四步：定稿 — 分批整合段落统一处理，支持大文件"""
+    """执行第四步：定稿 + 整体勘误（常识/文化/习俗用语等）"""
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
     if not translation or translation.current_step < 4:
         raise HTTPException(status_code=400, detail="Please complete step 3 first")
-    client = get_ai_client()
     paragraphs = db.query(LiteraryParagraph).filter(
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
 
-    total_chars = sum(len(p.step3_revision or p.translated_text or "") for p in paragraphs)
+    # 1) 定稿：只处理尚未完成的段落
+    pending = [p for p in paragraphs if not _para_has_text(p.step4_finalization)]
+    if pending:
+        total_chars = sum(len(p.step3_revision or p.translated_text or "") for p in pending)
+        if total_chars <= STEP4_BATCH_CHARS:
+            _ensure_workflow_active(translation_id)
+            await _finalize_paragraph_batch(translation, pending, db)
+        else:
+            for batch in _split_paragraphs_into_batches(
+                pending,
+                lambda p: len(p.step3_revision or p.translated_text or ""),
+            ):
+                _ensure_workflow_active(translation_id)
+                await _finalize_paragraph_batch(translation, batch, db)
 
-    if total_chars <= STEP4_BATCH_CHARS:
-        if translation_id in CANCELLED_TRANSLATIONS:
-            translation.status = LiteraryTranslationStatus.FAILED
-            translation.error_message = "Cancelled by user"
-            db.commit()
-            raise WorkflowCancelled()
-        await _finalize_paragraph_batch(client, translation, paragraphs, db)
-    else:
-        batches: list[list] = []
-        current_batch: list = []
-        current_size = 0
-        for para in paragraphs:
-            p_size = len(para.step3_revision or para.translated_text or "")
-            if current_size + p_size > STEP4_BATCH_CHARS and current_batch:
-                batches.append(current_batch)
-                current_batch = [para]
-                current_size = p_size
-            else:
-                current_batch.append(para)
-                current_size += p_size
-        if current_batch:
-            batches.append(current_batch)
+    # 2) 整体勘误：以全文/分批视角订正常识、文化、习俗用语等
+    # 刷新段落，确保使用最新定稿文本
+    paragraphs = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation_id
+    ).order_by(LiteraryParagraph.paragraph_index).all()
+    if paragraphs:
+        total_chars = sum(
+            len(p.step4_finalization or p.translated_text or "") for p in paragraphs
+        )
+        if total_chars <= STEP4_BATCH_CHARS:
+            _ensure_workflow_active(translation_id)
+            await _holistic_errata_batch(translation, paragraphs, db)
+        else:
+            for batch in _split_paragraphs_into_batches(
+                paragraphs,
+                lambda p: len(p.step4_finalization or p.translated_text or ""),
+            ):
+                _ensure_workflow_active(translation_id)
+                await _holistic_errata_batch(translation, batch, db)
 
-        for batch in batches:
-            if translation_id in CANCELLED_TRANSLATIONS:
-                translation.status = LiteraryTranslationStatus.FAILED
-                translation.error_message = "Cancelled by user"
-                db.commit()
-                raise WorkflowCancelled()
-            await _finalize_paragraph_batch(client, translation, batch, db)
-
+    paragraphs = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation_id
+    ).order_by(LiteraryParagraph.paragraph_index).all()
     finalized_all = PARA_SEP.join(
         (p.step4_finalization or p.translated_text or "") for p in paragraphs
     )
@@ -831,7 +1186,7 @@ def _format_error_debug(exc: BaseException, step: int, step_name: str) -> str:
     )
 
 
-async def _run_workflow_background(translation_id: int):
+async def _run_workflow_background(translation_id: int, generation: int):
     """后台依次执行四步翻译流程：初译 → 校验 → 修改 → 定稿"""
     db = SessionLocal()
     steps = [
@@ -840,10 +1195,24 @@ async def _run_workflow_background(translation_id: int):
         (3, "修改", _execute_step3),
         (4, "定稿", _execute_step4),
     ]
+    mode_token = None
+    gen_token = _current_workflow_generation.set(generation)
     try:
+        # 已被更新的启动顶替则直接退出，避免写回旧结果
+        if WORKFLOW_GENERATION.get(translation_id) != generation:
+            return
+        t0 = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
+        mode_token = push_collab_mode(getattr(t0, "collab_mode", None) if t0 else None)
+        start_step = (getattr(t0, "current_step", 1) or 1) if t0 else 1
         for step_num, step_name, step_fn in steps:
+            if step_num < start_step:
+                continue
+            _ensure_workflow_active(translation_id)
             await step_fn(translation_id, db)
     except WorkflowCancelled:
+        # 仅当前这一轮仍有效时才标失败；被重开顶替时不要覆盖新任务状态
+        if WORKFLOW_GENERATION.get(translation_id) != generation:
+            return
         try:
             translation = db.query(LiteraryTranslation).filter(
                 LiteraryTranslation.id == translation_id
@@ -856,6 +1225,8 @@ async def _run_workflow_background(translation_id: int):
         except Exception:
             pass
     except Exception as e:
+        if WORKFLOW_GENERATION.get(translation_id) != generation:
+            return
         # 确定失败步骤（当前步骤尚未完成）
         failed_step = 1
         failed_name = "初译"
@@ -885,12 +1256,20 @@ async def _run_workflow_background(translation_id: int):
         traceback.print_exc()
         print(f"[Workflow] Translation {translation_id} failed: {e}")
     finally:
+        _current_workflow_generation.reset(gen_token)
+        if mode_token is not None:
+            reset_collab_mode(mode_token)
         db.close()
+
+
+class WorkflowStartRequest(BaseModel):
+    collab_mode: Optional[str] = None
 
 
 @router.post("/translations/{translation_id}/workflow/start")
 async def start_translation_workflow(
     translation_id: int,
+    request: WorkflowStartRequest = Body(default_factory=WorkflowStartRequest),
     db: Session = Depends(get_db)
 ):
     """启动四步翻译流程（后台执行：初译 → 校验 → 修改 → 定稿），立即返回，前端轮询状态"""
@@ -900,32 +1279,53 @@ async def start_translation_workflow(
     if not translation:
         raise HTTPException(status_code=404, detail="Translation not found")
 
-    running_statuses = {
-        LiteraryTranslationStatus.TRANSLATING,
-        LiteraryTranslationStatus.VERIFYING,
-        LiteraryTranslationStatus.REVISING,
-        LiteraryTranslationStatus.FINALIZING,
-    }
-    if translation.status in running_statuses:
-        raise HTTPException(status_code=409, detail="翻译流程正在执行中")
+    # 允许失败/完成/卡住任务重开；bump 代数会顶替仍在跑的旧后台协程
+    generation = _bump_workflow_generation(translation_id)
 
-    translation.current_step = 1
-    translation.status = LiteraryTranslationStatus.TRANSLATING
-    translation.step1_translation = None
-    translation.step2_verification = None
-    translation.step3_revision = None
+    mode = request.collab_mode if request else None
+    translation.collab_mode = _resolve_task_collab_mode(mode or getattr(translation, "collab_mode", None))
+
+    # 保留段落已有译文，从未完成的步骤/段落继续
+    paragraphs = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation_id
+    ).order_by(LiteraryParagraph.paragraph_index).all()
+    resume_step = _detect_resume_step(paragraphs)
+    status_by_step = {
+        1: LiteraryTranslationStatus.TRANSLATING,
+        2: LiteraryTranslationStatus.VERIFYING,
+        3: LiteraryTranslationStatus.REVISING,
+        4: LiteraryTranslationStatus.FINALIZING,
+    }
+    translation.current_step = resume_step
+    translation.status = status_by_step.get(resume_step, LiteraryTranslationStatus.TRANSLATING)
+    # 任务级汇总按已完成步骤回填，便于进度展示；段落级内容全部保留
+    translation.step1_translation = (
+        "\n\n".join(p.step1_translation or "" for p in paragraphs if _para_has_text(p.step1_translation))
+        if resume_step > 1 else None
+    )
+    translation.step2_verification = (
+        "\n\n".join(p.step2_verification or "" for p in paragraphs if _para_has_text(p.step2_verification))
+        if resume_step > 2 else None
+    )
+    translation.step3_revision = (
+        "\n\n".join(p.step3_revision or "" for p in paragraphs if _para_has_text(p.step3_revision))
+        if resume_step > 3 else None
+    )
     translation.step4_finalization = None
     translation.final_translation = None
-    translation.beauty_sound_score = None
-    translation.beauty_word_score = None
-    translation.beauty_meaning_score = None
     translation.completed_at = None
-    translation.error_message = None  # 新流程开始时清空旧错误
+    translation.error_message = None
+
     db.commit()
 
-    asyncio.create_task(_run_workflow_background(translation_id))
+    asyncio.create_task(_run_workflow_background(translation_id, generation))
 
-    return {"message": "翻译流程已启动", "status": "translating"}
+    return {
+        "message": "翻译流程已启动",
+        "status": translation.status,
+        "collab_mode": translation.collab_mode,
+        "resume_step": resume_step,
+    }
 
 @router.post("/translations/{translation_id}/workflow/stop")
 async def stop_translation_workflow(
@@ -945,7 +1345,8 @@ async def stop_translation_workflow(
     }
     if translation.status not in running_statuses:
         return {"message": "当前未在运行", "status": translation.status}
-    CANCELLED_TRANSLATIONS.add(translation_id)
+    # bump 代数，令后台协程在下一段/下一步时自行退出
+    _bump_workflow_generation(translation_id)
     translation.status = LiteraryTranslationStatus.FAILED
     translation.error_message = "Cancelled by user"
     db.commit()
@@ -961,17 +1362,26 @@ async def _run_batch_workflow_background(translation_ids: list):
             ).first()
             if not translation:
                 continue
-            translation.current_step = 1
-            translation.status = LiteraryTranslationStatus.TRANSLATING
+            generation = _bump_workflow_generation(tid)
+            paragraphs = db.query(LiteraryParagraph).filter(
+                LiteraryParagraph.translation_id == tid
+            ).order_by(LiteraryParagraph.paragraph_index).all()
+            resume_step = _detect_resume_step(paragraphs)
+            status_by_step = {
+                1: LiteraryTranslationStatus.TRANSLATING,
+                2: LiteraryTranslationStatus.VERIFYING,
+                3: LiteraryTranslationStatus.REVISING,
+                4: LiteraryTranslationStatus.FINALIZING,
+            }
+            translation.current_step = resume_step
+            translation.status = status_by_step.get(resume_step, LiteraryTranslationStatus.TRANSLATING)
             translation.step1_translation = None
             translation.step2_verification = None
             translation.step3_revision = None
             translation.step4_finalization = None
             translation.final_translation = None
-            translation.beauty_sound_score = None
-            translation.beauty_word_score = None
-            translation.beauty_meaning_score = None
             translation.completed_at = None
+            translation.error_message = None
             db.commit()
         except Exception:
             db.close()
@@ -980,7 +1390,7 @@ async def _run_batch_workflow_background(translation_ids: list):
             db.close()
 
         try:
-            await _run_workflow_background(tid)
+            await _run_workflow_background(tid, generation)
         except Exception as e:
             print(f"[BatchWorkflow] Translation {tid} failed: {e}")
 
@@ -994,6 +1404,8 @@ async def start_batch_workflow(
     translation_ids = request.get("translation_ids", [])
     if not translation_ids:
         raise HTTPException(status_code=400, detail="请选择至少一个任务")
+    batch_mode = request.get("collab_mode")
+    resolved_mode = _resolve_task_collab_mode(batch_mode) if batch_mode else None
 
     running_statuses = {
         LiteraryTranslationStatus.TRANSLATING,
@@ -1009,6 +1421,10 @@ async def start_batch_workflow(
             continue
         if t.status in running_statuses:
             continue
+        if resolved_mode:
+            t.collab_mode = resolved_mode
+        elif not getattr(t, "collab_mode", None):
+            t.collab_mode = _default_system_collab_mode()
         t.status = LiteraryTranslationStatus.PENDING
         valid_ids.append(tid)
 
@@ -1118,7 +1534,7 @@ async def get_workflow_status(
         (1, "翻译", translation.step1_translation),
         (2, "校验", translation.step2_verification),
         (3, "修改", translation.step3_revision),
-        (4, "定稿", translation.step4_finalization),
+        (4, "定稿勘误", translation.step4_finalization),
     ]
 
     steps = []
@@ -1250,25 +1666,72 @@ async def retranslate_paragraph(
     ).order_by(LiteraryParagraph.paragraph_index).all()
     index = next((i for i, p in enumerate(all_paras) if p.id == paragraph.id), 0)
 
-    client = get_ai_client()
     reference_content = get_reference_and_requirements(translation, db)
     ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
     story_mode = is_story_type(translation.literary_type)
     guidance = build_prompt_guidance(translation, db, include_story=story_mode)
     neighbor = neighbor_note(all_paras, index) if story_mode else ""
+    mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
 
     try:
-        result = await client.literary_translate_paragraph(
-            paragraph=source_text,
-            source_lang=translation.source_lang,
-            target_lang=translation.target_lang,
-            literary_type=translation.literary_type,
-            reference_content=ref_safe or None,
-            guidance=guidance or None,
-            neighbor_context=neighbor or None,
+        step1 = await call_for_step(
+            1,
+            lambda c: c.literary_translate(
+                source_text, translation.source_lang, translation.target_lang,
+                translation.literary_type, ref_safe or None,
+                guidance=guidance or None,
+                neighbor_context=neighbor or None,
+            ),
         )
+        step2_result = await call_for_step(
+            2,
+            lambda c: c.literary_verify(
+                source_text, step1, translation.source_lang, translation.target_lang,
+                translation.literary_type, guidance=guidance or None,
+            ),
+        )
+        step2 = step2_result.get("verified_translation", step1)
+        step3_result = await call_for_step(
+            3,
+            lambda c: c.literary_revise(
+                source_text, step2, step2_result, translation.source_lang, translation.target_lang,
+                translation.literary_type, guidance=guidance or None,
+            ),
+        )
+        step3 = step3_result.get("revised_translation", step2)
+        step4_result = await call_for_step(
+            4,
+            lambda c: c.literary_finalize(
+                source_text, step3, translation.source_lang, translation.target_lang,
+                translation.literary_type, guidance=guidance or None,
+            ),
+        )
+        step4 = step4_result.get("final_translation", step3)
+        errata_result = await call_for_step(
+            4,
+            lambda c: c.literary_holistic_errata(
+                source_text, step4, translation.source_lang, translation.target_lang,
+                translation.literary_type, guidance=guidance or None, paragraph_count=1,
+            ),
+        )
+        step4 = AIClient._strip_translation_wrappers(
+            errata_result.get("corrected_translation", step4) or step4
+        )
+        result = {
+            "step1_translation": step1,
+            "step2_verification": step2,
+            "step3_revision": step3,
+            "step4_finalization": step4,
+            "beauty_scores": {
+                "sound": step2_result.get("beauty_sound_score", 7.0),
+                "word": step2_result.get("beauty_word_score", 7.0),
+                "meaning": step2_result.get("beauty_meaning_score", 7.0),
+            },
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重译失败: {e}") from e
+    finally:
+        reset_collab_mode(mode_token)
 
     paragraph.step1_translation = result["step1_translation"]
     paragraph.step2_verification = result["step2_verification"]
@@ -2159,7 +2622,7 @@ SUPPORTED_UPLOAD_EXTENSIONS = {
     'txt', 'md', 'markdown', 'text',
     'docx', 'doc',   # Word
     'pdf',
-    'mobi', 'azw',   # 电子书
+    'mobi', 'azw', 'azw3',  # 电子书（含 KF8）
     'html', 'htm', 'xhtml', 'xml', 'json', 'csv',
     'log', 'rst', 'tex', 'srt', 'sub', 'vtt', 'yaml', 'yml', 'ini', 'cfg', 'properties',
 }
@@ -2194,38 +2657,278 @@ def _extract_text_pdf(content: bytes) -> str:
     return "\n\n".join(parts)
 
 
-def _extract_text_mobi(content: bytes) -> str:
-    """从 MOBI/AZW 电子书提取正文。解压后可能是 HTML/EPUB/PDF，按类型处理"""
+def _drop_html_block(raw: str, tag: str) -> str:
+    """线性去掉 script/style，避免大文件上正则回溯卡住。"""
+    low = raw.lower()
+    open_mark = f"<{tag}"
+    close_mark = f"</{tag}>"
+    out: List[str] = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        start = low.find(open_mark, i)
+        if start < 0:
+            out.append(raw[i:])
+            break
+        out.append(raw[i:start])
+        gt = low.find(">", start)
+        if gt < 0:
+            break
+        end = low.find(close_mark, gt)
+        if end < 0:
+            i = gt + 1
+            continue
+        i = end + len(close_mark)
+    return "".join(out)
+
+
+def _html_to_plain_text(raw: str) -> str:
+    """HTML/XHTML 转纯文本，保留段落换行。"""
     import html as html_lib
+    text = _drop_html_block(raw, "script")
+    text = _drop_html_block(text, "style")
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(
+        r"(?i)</\s*(p|div|h[1-6]|li|tr|section|article|blockquote)\s*>",
+        "\n\n",
+        text,
+    )
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def _readable_score(text: str) -> int:
+    if not text:
+        return 0
+    return len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", text))
+
+
+def _extract_text_from_epub(epub_path: str) -> str:
+    """从 EPUB（ZIP）中按阅读顺序提取 HTML/XHTML 正文。"""
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    def _local(tag: str) -> str:
+        return tag.split("}")[-1] if "}" in tag else tag
+
+    with zipfile.ZipFile(epub_path, "r") as zf:
+        names = zf.namelist()
+        # 定位 OPF
+        opf_path = None
+        if "META-INF/container.xml" in names:
+            try:
+                root = ET.fromstring(zf.read("META-INF/container.xml"))
+                for node in root.iter():
+                    if _local(node.tag) == "rootfile":
+                        opf_path = node.attrib.get("full-path")
+                        break
+            except ET.ParseError:
+                opf_path = None
+        if not opf_path:
+            for name in names:
+                if name.lower().endswith(".opf"):
+                    opf_path = name
+                    break
+
+        spine_hrefs: List[str] = []
+        if opf_path and opf_path in names:
+            try:
+                opf = ET.fromstring(zf.read(opf_path))
+                manifest = {}
+                for node in opf.iter():
+                    if _local(node.tag) == "item":
+                        item_id = node.attrib.get("id")
+                        href = node.attrib.get("href")
+                        if item_id and href:
+                            manifest[item_id] = href
+                for node in opf.iter():
+                    if _local(node.tag) == "itemref":
+                        idref = node.attrib.get("idref")
+                        href = manifest.get(idref or "")
+                        if href:
+                            spine_hrefs.append(href)
+            except ET.ParseError:
+                spine_hrefs = []
+
+        opf_dir = opf_path.rsplit("/", 1)[0] if opf_path and "/" in opf_path else ""
+
+        def _resolve(href: str) -> Optional[str]:
+            from urllib.parse import unquote
+            href = unquote((href or "").split("#", 1)[0].split("?", 1)[0]).replace("\\", "/")
+            candidates = []
+            if opf_dir:
+                candidates.append(f"{opf_dir}/{href}".replace("\\", "/"))
+            candidates.append(href)
+            # 有些路径带 ../
+            for c in candidates:
+                parts = []
+                for part in c.split("/"):
+                    if part in ("", "."):
+                        continue
+                    if part == "..":
+                        if parts:
+                            parts.pop()
+                        continue
+                    parts.append(part)
+                norm = "/".join(parts)
+                if norm in names:
+                    return norm
+            # 退化为 basename 匹配
+            base = href.split("/")[-1]
+            for name in names:
+                if name.endswith("/" + base) or name == base:
+                    return name
+            return None
+
+        html_parts: List[str] = []
+        if spine_hrefs:
+            for href in spine_hrefs:
+                path = _resolve(href)
+                if not path:
+                    continue
+                raw = zf.read(path).decode("utf-8", errors="ignore")
+                part = _html_to_plain_text(raw)
+                if part:
+                    html_parts.append(part)
+        if not html_parts:
+            # 无 spine 时扫全部 html/xhtml
+            for name in names:
+                lower = name.lower()
+                if lower.endswith((".html", ".xhtml", ".htm")) and "meta-inf" not in lower:
+                    raw = zf.read(name).decode("utf-8", errors="ignore")
+                    part = _html_to_plain_text(raw)
+                    if part:
+                        html_parts.append(part)
+        return "\n\n".join(html_parts).strip()
+
+
+def _long_win_path(path: str) -> str:
+    ap = os.path.abspath(path)
+    if ap.startswith("\\\\?\\"):
+        return ap
+    return "\\\\?\\" + ap
+
+
+def _open_tolerant(path, mode="r", **kwargs):
+    """Windows 上超长路径或非法参数时改用 \\\\?\\ 前缀再打开。"""
+    try:
+        return open(path, mode, **kwargs)
+    except OSError as e:
+        if os.name == "nt" and getattr(e, "errno", None) == 22 and isinstance(path, str):
+            return open(_long_win_path(path), mode, **kwargs)
+        raise
+
+
+def _read_html_file(path: str) -> str:
+    with _open_tolerant(path, "r", encoding="utf-8", errors="ignore") as f:
+        return _html_to_plain_text(f.read())
+
+
+def _extract_text_mobi(content: bytes) -> str:
+    """从 MOBI/AZW/AZW3 提取正文。
+
+    以 mobi.extract 返回的文件为主（原先能解析的书走这条）。
+    双格式书还会额外尝试 EPUB 目录和 mobi7/book.html，取可读文字更多的一份。
+    某一路失败不会把整本判失败。
+    """
+    import builtins
+    import contextlib
+    import io
     import mobi
+
+    @contextlib.contextmanager
+    def _unpack_compat():
+        """解包时屏蔽 print（Windows 控制台会抛 Errno 22），并重试超长路径。"""
+        orig_open = builtins.open
+        orig_mkdir = os.mkdir
+
+        def safe_open(file, *args, **kwargs):
+            try:
+                return orig_open(file, *args, **kwargs)
+            except OSError as e:
+                if (
+                    os.name == "nt"
+                    and getattr(e, "errno", None) == 22
+                    and isinstance(file, (str, os.PathLike))
+                ):
+                    return orig_open(_long_win_path(os.fspath(file)), *args, **kwargs)
+                raise
+
+        def safe_mkdir(dir_path, *args, **kwargs):
+            try:
+                return orig_mkdir(dir_path, *args, **kwargs)
+            except OSError as e:
+                if (
+                    os.name == "nt"
+                    and getattr(e, "errno", None) == 22
+                    and isinstance(dir_path, (str, os.PathLike))
+                ):
+                    return orig_mkdir(_long_win_path(os.fspath(dir_path)), *args, **kwargs)
+                raise
+
+        builtins.open = safe_open
+        os.mkdir = safe_mkdir
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                yield
+        finally:
+            builtins.open = orig_open
+            os.mkdir = orig_mkdir
+
     fd, path = tempfile.mkstemp(suffix=".mobi")
     try:
         os.write(fd, content)
         os.close(fd)
-        tempdir, filepath = mobi.extract(path)
+        with _unpack_compat():
+            tempdir, filepath = mobi.extract(path)
         try:
             ext = filepath.split(".")[-1].lower() if "." in filepath else ""
+            candidates: List[str] = []
+
             if ext == "pdf":
-                with open(filepath, "rb") as f:
-                    return _extract_text_pdf(f.read())
-            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                raw = f.read()
-            # 保留块级结构，避免整本书被压成一行后只能按字数硬切
-            text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", raw)
-            text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
-            text = re.sub(
-                r"(?i)</\s*(p|div|h[1-6]|li|tr|section|article|blockquote)\s*>",
-                "\n\n",
-                text,
-            )
-            text = re.sub(r"<[^>]+>", " ", text)
-            text = html_lib.unescape(text)
-            text = re.sub(r"[ \t]+\n", "\n", text)
-            text = re.sub(r"\n{3,}", "\n\n", text)
-            text = re.sub(r"[ \t]{2,}", " ", text)
-            return text.strip()
+                try:
+                    with open(filepath, "rb") as f:
+                        candidates.append(_extract_text_pdf(f.read()) or "")
+                except Exception:
+                    pass
+            else:
+                try:
+                    candidates.append(_read_html_file(filepath))
+                except Exception:
+                    pass
+
+            if ext == "epub":
+                try:
+                    candidates.append(_extract_text_from_epub(filepath) or "")
+                except Exception:
+                    pass
+
+            html_fallback = os.path.join(tempdir, "mobi7", "book.html")
+            if os.path.isfile(html_fallback) and os.path.abspath(html_fallback) != os.path.abspath(filepath):
+                try:
+                    candidates.append(_read_html_file(html_fallback))
+                except Exception:
+                    pass
+
+            best = max(candidates, key=_readable_score, default="")
+            if best and best.strip():
+                return best.strip()
+            raise ValueError("未提取到正文（可能是 DRM 加密或损坏的电子书）")
         finally:
             shutil.rmtree(tempdir, ignore_errors=True)
+    except ValueError:
+        raise
+    except Exception as e:
+        msg = str(e) or type(e).__name__
+        lower = msg.lower()
+        if "drm" in lower or "encryption" in lower or "encrypted" in lower:
+            raise ValueError("该电子书带有 DRM 加密，无法解析") from e
+        raise ValueError(f"MOBI/AZW 解析失败: {msg}") from e
     finally:
         try:
             os.unlink(path)
@@ -2241,11 +2944,13 @@ def parse_text_file(content: bytes, file_type: str) -> str:
             return _extract_text_docx(content)
         if ext == "pdf":
             return _extract_text_pdf(content)
-        if ext in ("mobi", "azw"):
+        if ext in ("mobi", "azw", "azw3"):
             return _extract_text_mobi(content)
         # 文本类：多编码解码
         text = _decode_text_content(content)
         return text
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"无法解析文件 ({ext}): {str(e)}")
 
@@ -2280,6 +2985,8 @@ async def parse_uploaded_file(file: UploadFile = File(...)):
         text = parse_text_file(content, ext)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if not (text or "").strip():
+        raise HTTPException(status_code=400, detail="未能从文件中提取到正文，请确认文件未加密且格式完整")
     para_count = len(split_text_into_paragraphs(text))
     return {"text": text, "filename": file.filename, "char_count": len(text), "paragraph_count": para_count}
 
@@ -2295,6 +3002,7 @@ async def upload_and_translate_file(
     user_requirements: Optional[str] = Form(None),
     style_agent_id: Optional[int] = Form(None),
     auto_run: bool = Form(True, description="是否自动执行四步流程"),
+    collab_mode: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -2325,6 +3033,7 @@ async def upload_and_translate_file(
         reference_document_ids=ref_ids,
         user_requirements=user_requirements.strip() if user_requirements else None,
         style_agent_id=style_agent_id,
+        collab_mode=_resolve_task_collab_mode(collab_mode),
         status=LiteraryTranslationStatus.PENDING,
         current_step=1
     )
@@ -2341,6 +3050,7 @@ async def upload_and_translate_file(
         db.add(paragraph)
     db.commit()
     if auto_run:
+        mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
         try:
             await _execute_step1(translation.id, db)
             await _execute_step2(translation.id, db)
@@ -2351,6 +3061,8 @@ async def upload_and_translate_file(
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"自动执行四步流程失败: {str(e)}")
+        finally:
+            reset_collab_mode(mode_token)
     return {
         "message": "文件上传成功" + ("，四步流程已自动执行完成" if auto_run else "，翻译任务已创建"),
         "translation_id": translation.id,
@@ -2372,6 +3084,7 @@ async def upload_and_translate_batch(
     user_requirements: Optional[str] = Form(None),
     style_agent_id: Optional[int] = Form(None),
     auto_run: bool = Form(True, description="是否对每个任务自动执行四步流程"),
+    collab_mode: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -2383,6 +3096,7 @@ async def upload_and_translate_batch(
     results = []
     ref_ids = json.loads(reference_document_ids) if reference_document_ids else []
     req_text = user_requirements.strip() if user_requirements else None
+    task_mode = _resolve_task_collab_mode(collab_mode)
     _validate_style_agent_id(db, style_agent_id)
 
     for file in files:
@@ -2444,6 +3158,7 @@ async def upload_and_translate_batch(
             reference_document_ids=ref_ids,
             user_requirements=req_text,
             style_agent_id=style_agent_id,
+            collab_mode=task_mode,
             status=LiteraryTranslationStatus.PENDING,
             current_step=1,
         )
@@ -2461,6 +3176,7 @@ async def upload_and_translate_batch(
         db.commit()
 
         if auto_run:
+            mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
             try:
                 await _execute_step1(translation.id, db)
                 await _execute_step2(translation.id, db)
@@ -2480,6 +3196,8 @@ async def upload_and_translate_batch(
                     "status": translation.status,
                 })
                 continue
+            finally:
+                reset_collab_mode(mode_token)
 
         results.append({
             "filename": file.filename,
@@ -2523,77 +3241,125 @@ async def translate_all_chunks(
     # 更新状态为翻译中
     translation.status = LiteraryTranslationStatus.TRANSLATING
     db.commit()
-    
-    client = get_ai_client()
-    
+
     reference_content = get_reference_and_requirements(translation, db)
     guidance = build_prompt_guidance(translation, db, include_story=True)
-    
+    ref_safe = reference_content if reference_content else None
+
     # 批量翻译所有段落
     total = len(paragraphs)
     success_count = 0
-    
-    for idx, para in enumerate(paragraphs):
-        try:
-            result = await client.literary_translate_paragraph(
-                paragraph=para.source_text,
-                source_lang=translation.source_lang,
-                target_lang=translation.target_lang,
-                literary_type=translation.literary_type,
-                reference_content=reference_content if reference_content else None,
-                guidance=guidance or None,
-            )
-            
-            # 保存四步翻译结果
-            para.step1_translation = result["step1_translation"]
-            para.step2_verification = result["step2_verification"]
-            para.step3_revision = result["step3_revision"]
-            para.step4_finalization = result["step4_finalization"]
-            para.translated_text = result["step4_finalization"]
-            
-            # 保存三美评分
-            beauty_scores = result.get("beauty_scores", {})
-            para.beauty_sound_score = beauty_scores.get("sound", 7.0)
-            para.beauty_word_score = beauty_scores.get("word", 7.0)
-            para.beauty_meaning_score = beauty_scores.get("meaning", 7.0)
-            
-            success_count += 1
-            
-            # 每5段提交一次，避免事务过大
-            if (idx + 1) % 5 == 0:
-                db.commit()
-                
-        except Exception as e:
-            print(f"[Translate Chunk] Error at paragraph {para.paragraph_index}: {e}")
-            continue
-    
-    db.commit()
-    
-    # 更新任务状态
-    full_step1 = "\n\n".join([p.step1_translation or "" for p in paragraphs if p.step1_translation])
-    full_step2 = "\n\n".join([p.step2_verification or "" for p in paragraphs if p.step2_verification])
-    full_step3 = "\n\n".join([p.step3_revision or "" for p in paragraphs if p.step3_revision])
-    full_step4 = "\n\n".join([p.step4_finalization or "" for p in paragraphs if p.step4_finalization])
-    
-    translation.step1_translation = full_step1
-    translation.step2_verification = full_step2
-    translation.step3_revision = full_step3
-    translation.step4_finalization = full_step4
-    translation.final_translation = full_step4
-    translation.status = LiteraryTranslationStatus.COMPLETED
-    translation.current_step = 4
-    
-    from datetime import datetime
-    translation.completed_at = datetime.now()
-    
-    # 计算平均三美评分
-    if paragraphs:
-        translation.beauty_sound_score = sum([p.beauty_sound_score or 7.0 for p in paragraphs]) / len(paragraphs)
-        translation.beauty_word_score = sum([p.beauty_word_score or 7.0 for p in paragraphs]) / len(paragraphs)
-        translation.beauty_meaning_score = sum([p.beauty_meaning_score or 7.0 for p in paragraphs]) / len(paragraphs)
-    
-    db.commit()
-    
+    mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
+
+    try:
+        for idx, para in enumerate(paragraphs):
+            try:
+                text = para.source_text or ""
+                step1 = await call_for_step(
+                    1,
+                    lambda c, src=text: c.literary_translate(
+                        src, translation.source_lang, translation.target_lang,
+                        translation.literary_type, ref_safe, guidance=guidance or None,
+                    ),
+                )
+                step2_result = await call_for_step(
+                    2,
+                    lambda c, src=text, draft=step1: c.literary_verify(
+                        src, draft, translation.source_lang, translation.target_lang,
+                        translation.literary_type, guidance=guidance or None,
+                    ),
+                )
+                step2 = step2_result.get("verified_translation", step1)
+                step3_result = await call_for_step(
+                    3,
+                    lambda c, src=text, verified=step2, analysis=step2_result: c.literary_revise(
+                        src, verified, analysis, translation.source_lang, translation.target_lang,
+                        translation.literary_type, guidance=guidance or None,
+                    ),
+                )
+                step3 = step3_result.get("revised_translation", step2)
+                step4_result = await call_for_step(
+                    4,
+                    lambda c, src=text, revised=step3: c.literary_finalize(
+                        src, revised, translation.source_lang, translation.target_lang,
+                        translation.literary_type, guidance=guidance or None,
+                    ),
+                )
+                step4 = step4_result.get("final_translation", step3)
+                result = {
+                    "step1_translation": step1,
+                    "step2_verification": step2,
+                    "step3_revision": step3,
+                    "step4_finalization": step4,
+                }
+
+                # 保存四步翻译结果
+                para.step1_translation = result["step1_translation"]
+                para.step2_verification = result["step2_verification"]
+                para.step3_revision = result["step3_revision"]
+                para.step4_finalization = result["step4_finalization"]
+                para.translated_text = result["step4_finalization"]
+
+                # 保存三美评分
+                beauty_scores = result.get("beauty_scores", {})
+                para.beauty_sound_score = beauty_scores.get("sound", 7.0)
+                para.beauty_word_score = beauty_scores.get("word", 7.0)
+                para.beauty_meaning_score = beauty_scores.get("meaning", 7.0)
+
+                success_count += 1
+
+                # 每5段提交一次，避免事务过大
+                if (idx + 1) % 5 == 0:
+                    db.commit()
+
+            except Exception as e:
+                print(f"[Translate Chunk] Error at paragraph {para.paragraph_index}: {e}")
+                continue
+
+        db.commit()
+
+        # 全文整体勘误（常识/文化/习俗用语）
+        paragraphs = db.query(LiteraryParagraph).filter(
+            LiteraryParagraph.translation_id == translation_id
+        ).order_by(LiteraryParagraph.paragraph_index).all()
+        if paragraphs:
+            for batch in _split_paragraphs_into_batches(
+                paragraphs,
+                lambda p: len(p.step4_finalization or p.translated_text or ""),
+            ):
+                await _holistic_errata_batch(translation, batch, db)
+
+        paragraphs = db.query(LiteraryParagraph).filter(
+            LiteraryParagraph.translation_id == translation_id
+        ).order_by(LiteraryParagraph.paragraph_index).all()
+
+        # 更新任务状态
+        full_step1 = "\n\n".join([p.step1_translation or "" for p in paragraphs if p.step1_translation])
+        full_step2 = "\n\n".join([p.step2_verification or "" for p in paragraphs if p.step2_verification])
+        full_step3 = "\n\n".join([p.step3_revision or "" for p in paragraphs if p.step3_revision])
+        full_step4 = "\n\n".join([p.step4_finalization or "" for p in paragraphs if p.step4_finalization])
+
+        translation.step1_translation = full_step1
+        translation.step2_verification = full_step2
+        translation.step3_revision = full_step3
+        translation.step4_finalization = full_step4
+        translation.final_translation = full_step4
+        translation.status = LiteraryTranslationStatus.COMPLETED
+        translation.current_step = 4
+
+        from datetime import datetime
+        translation.completed_at = datetime.now()
+
+        # 计算平均三美评分
+        if paragraphs:
+            translation.beauty_sound_score = sum([p.beauty_sound_score or 7.0 for p in paragraphs]) / len(paragraphs)
+            translation.beauty_word_score = sum([p.beauty_word_score or 7.0 for p in paragraphs]) / len(paragraphs)
+            translation.beauty_meaning_score = sum([p.beauty_meaning_score or 7.0 for p in paragraphs]) / len(paragraphs)
+
+        db.commit()
+    finally:
+        reset_collab_mode(mode_token)
+
     # 后台自动提取专业词汇
     background_tasks.add_task(auto_extract_terms_after_finalize, translation_id, db)
     

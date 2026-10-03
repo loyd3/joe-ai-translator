@@ -23,6 +23,9 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         _ensure_story_profile_column()
         _ensure_style_agent_schema()
+        _ensure_group_name_column()
+        _ensure_translation_collab_mode_column()
+        _ensure_document_groups_table()
         _ensure_ai_config_columns()
         logger.info("Database tables ready.")
     except OperationalError as e:
@@ -79,6 +82,77 @@ def _ensure_style_agent_schema():
         logger.warning("Could not ensure style agent schema: %s", e)
 
 
+def _ensure_group_name_column():
+    """已有库不会被 create_all 改表，缺列时补上分组字段。"""
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(engine)
+        if "literary_translations" not in inspector.get_table_names():
+            return
+        columns = {column["name"] for column in inspector.get_columns("literary_translations")}
+        if "group_name" in columns:
+            return
+        ddl = "ALTER TABLE literary_translations ADD COLUMN group_name VARCHAR(200) NULL"
+        if engine.dialect.name == "sqlite":
+            ddl = "ALTER TABLE literary_translations ADD COLUMN group_name VARCHAR(200)"
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+        logger.info("Added literary_translations.group_name")
+    except Exception as e:
+        logger.warning("Could not ensure group_name column: %s", e)
+
+
+def _ensure_translation_collab_mode_column():
+    """为翻译任务补齐 collab_mode（按任务选择全线上/全本地/混合）。"""
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(engine)
+        if "literary_translations" not in inspector.get_table_names():
+            return
+        columns = {column["name"] for column in inspector.get_columns("literary_translations")}
+        if "collab_mode" in columns:
+            return
+        ddl = "ALTER TABLE literary_translations ADD COLUMN collab_mode VARCHAR(20) NULL"
+        if engine.dialect.name == "sqlite":
+            ddl = "ALTER TABLE literary_translations ADD COLUMN collab_mode VARCHAR(20)"
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+        logger.info("Added literary_translations.collab_mode")
+    except Exception as e:
+        logger.warning("Could not ensure translation collab_mode column: %s", e)
+
+
+def _ensure_document_groups_table():
+    """确保自定义分组表存在，并同步已有 group_name。"""
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        if "document_groups" not in tables:
+            Base.metadata.tables["document_groups"].create(bind=engine, checkfirst=True)
+            logger.info("Created document_groups table")
+        if "literary_translations" not in tables:
+            return
+        columns = {column["name"] for column in inspector.get_columns("literary_translations")}
+        if "group_name" not in columns:
+            return
+        with engine.begin() as conn:
+            if engine.dialect.name == "sqlite":
+                conn.execute(text(
+                    "INSERT OR IGNORE INTO document_groups (name, sort_order) "
+                    "SELECT DISTINCT TRIM(group_name), 0 FROM literary_translations "
+                    "WHERE group_name IS NOT NULL AND TRIM(group_name) <> ''"
+                ))
+            else:
+                conn.execute(text(
+                    "INSERT IGNORE INTO document_groups (name, sort_order) "
+                    "SELECT DISTINCT TRIM(group_name), 0 FROM literary_translations "
+                    "WHERE group_name IS NOT NULL AND TRIM(group_name) <> ''"
+                ))
+    except Exception as e:
+        logger.warning("Could not ensure document_groups table: %s", e)
+
+
 def _ensure_ai_config_columns():
     """为 ai_config 补齐高级采样与超时字段。"""
     from sqlalchemy import inspect, text
@@ -87,6 +161,12 @@ def _ensure_ai_config_columns():
         "frequency_penalty": ("FLOAT NULL", "REAL"),
         "presence_penalty": ("FLOAT NULL", "REAL"),
         "timeout_seconds": ("INT NULL", "INTEGER"),
+        "collab_mode": ("VARCHAR(20) NULL", "VARCHAR(20)"),
+        "draft_provider": ("VARCHAR(50) NULL", "VARCHAR(50)"),
+        "draft_api_key": ("VARCHAR(500) NULL", "VARCHAR(500)"),
+        "draft_model": ("VARCHAR(200) NULL", "VARCHAR(200)"),
+        "draft_base_url": ("VARCHAR(500) NULL", "VARCHAR(500)"),
+        "draft_fallback": ("TINYINT(1) NULL", "INTEGER"),
     }
     try:
         inspector = inspect(engine)

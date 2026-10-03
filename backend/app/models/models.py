@@ -63,6 +63,7 @@ class LiteraryTranslation(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(500), nullable=True, comment="文本标题")
+    group_name = Column(String(200), nullable=True, index=True, comment="用户自定义分组，空=未分组")
     source_text = Column(Text, nullable=False, comment="原文")
     
     # 四步翻译结果
@@ -79,6 +80,8 @@ class LiteraryTranslation(Base):
     source_lang = Column(String(10), nullable=False, comment="源语言")
     target_lang = Column(String(10), nullable=False, comment="目标语言")
     literary_type = Column(String(50), default="general", comment="文学类型: poetry, prose, novel, drama, general")
+    # online=全部线上，local=全部本地，collab=本地预译+线上润色
+    collab_mode = Column(String(20), nullable=True, default="online", comment="本任务翻译模型模式")
     
     # 三美原则评分
     beauty_sound_score = Column(Float, nullable=True, comment="音美评分 0-10")
@@ -143,6 +146,17 @@ class LiteraryParagraph(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     translation = relationship("LiteraryTranslation", back_populates="paragraphs")
+
+
+class DocumentGroup(Base):
+    """翻译文档自定义分组（可空组，独立于任务存在）"""
+    __tablename__ = "document_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False, unique=True, index=True, comment="分组名称")
+    sort_order = Column(Integer, default=0, comment="排序，越小越靠前")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
 class ReferenceDocument(Base):
@@ -259,6 +273,13 @@ class AIConfig(Base):
     frequency_penalty = Column(Float, nullable=True, comment="频率惩罚")
     presence_penalty = Column(Float, nullable=True, comment="存在惩罚")
     timeout_seconds = Column(Integer, nullable=True, comment="请求超时秒数")
+    # 协同模式：online=全部线上，local=全部本地，collab=本地预译+线上润色
+    collab_mode = Column(String(20), nullable=True, default="online", comment="翻译模型模式")
+    draft_provider = Column(String(50), nullable=True, comment="本地草稿模型提供商")
+    draft_api_key = Column(String(500), nullable=True, comment="本地草稿模型 API Key")
+    draft_model = Column(String(200), nullable=True, comment="本地草稿模型名")
+    draft_base_url = Column(String(500), nullable=True, comment="本地草稿模型地址")
+    draft_fallback = Column(Boolean, nullable=True, default=True, comment="本地失败时是否回退线上模型")
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

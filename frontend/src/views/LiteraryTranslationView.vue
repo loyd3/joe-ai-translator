@@ -19,6 +19,11 @@
             @click="startBatchWorkflow"
             :loading="batchStarting"
           >翻译 {{ selectedTaskIds.length }} 项</el-button>
+          <el-tooltip v-if="!batchMode" content="文档库" placement="top">
+            <el-button circle class="icon-btn" :type="panelMode === 'documents' ? 'primary' : 'default'" @click="goToDocuments">
+              <el-icon><FolderOpened /></el-icon>
+            </el-button>
+          </el-tooltip>
           <el-tooltip v-if="!batchMode" content="批量翻译" placement="top">
             <el-button circle class="icon-btn" @click="enterBatchMode">
               <el-icon><List /></el-icon>
@@ -38,16 +43,41 @@
       </div>
 
       <div class="category-filter">
-        <el-radio-group v-model="categoryGroup" class="category-group">
+        <el-radio-group v-model="categoryGroup" class="category-group" @change="onFilterChange">
           <el-radio-button label="all">全部</el-radio-button>
           <el-radio-button label="literary">文学</el-radio-button>
           <el-radio-button label="professional">专业</el-radio-button>
         </el-radio-group>
+        <div class="group-filter-row">
+          <el-select
+            v-model="selectedGroup"
+            class="group-select"
+            size="small"
+            placeholder="全部分组"
+            clearable
+            filterable
+            @change="onFilterChange"
+          >
+            <el-option label="全部分组" value="" />
+            <el-option label="未分组" value="__ungrouped__" />
+            <el-option
+              v-for="g in namedGroups"
+              :key="g.name"
+              :label="`${g.name} (${g.count})`"
+              :value="g.name"
+            />
+          </el-select>
+          <el-tooltip content="管理分组" placement="top">
+            <el-button circle size="small" class="icon-btn" @click="showGroupManager = true">
+              <el-icon><FolderOpened /></el-icon>
+            </el-button>
+          </el-tooltip>
+        </div>
       </div>
 
       <div class="task-list" v-loading="loadingTasks">
         <div
-          v-for="task in filteredTaskList"
+          v-for="task in taskList"
           :key="task.id"
           :class="['task-item', { active: !batchMode && currentTask?.id === task.id, selected: batchMode && selectedTaskIds.includes(task.id) }]"
           @click="batchMode ? toggleTaskSelection(task.id) : selectTask(task)"
@@ -65,6 +95,7 @@
             <div class="task-meta">
               <el-tag size="small" :type="getStatusType(task.status)">{{ getStatusText(task.status) }}</el-tag>
               <el-tag size="small" :type="isLiteraryType(task.literary_type) ? '' : 'warning'" effect="plain" round>{{ getTypeName(task.literary_type) }}</el-tag>
+              <el-tag v-if="task.group_name" size="small" type="info" effect="plain" round>{{ task.group_name }}</el-tag>
             </div>
           </div>
           <div class="task-actions" v-if="!batchMode" @click.stop>
@@ -72,10 +103,25 @@
             <el-button link type="danger" size="small" @click="confirmDeleteTask(task)"><el-icon><Delete /></el-icon></el-button>
           </div>
         </div>
-        <el-empty v-if="filteredTaskList.length === 0" description="暂无任务" :image-size="60" />
+        <el-empty v-if="!loadingTasks && taskList.length === 0" description="暂无任务" :image-size="60" />
+      </div>
+
+      <div class="sidebar-pager" v-if="taskTotal > TASK_PAGE_SIZE">
+        <el-pagination
+          small
+          layout="prev, pager, next"
+          :total="taskTotal"
+          :page-size="TASK_PAGE_SIZE"
+          :current-page="taskPage"
+          @current-change="onTaskPageChange"
+        />
       </div>
 
       <div class="sidebar-footer-row">
+        <div class="sidebar-footer" :class="{ active: panelMode === 'documents' }" @click="goToDocuments">
+          <el-icon><FolderOpened /></el-icon>
+          <span>文档库</span>
+        </div>
         <div class="sidebar-footer" @click="openThemeSettings">
           <el-icon><Sunny /></el-icon>
           <span>主题设置</span>
@@ -88,10 +134,15 @@
           <el-icon><Brush /></el-icon>
           <span>文风设定</span>
         </div>
-        <div class="sidebar-footer" @click="goToAIConfigPage">
+        <div class="sidebar-footer ai-config-entry" @click="goToAIConfigPage">
           <el-icon><Setting /></el-icon>
-          <span>大模型配置</span>
-          <el-tag v-if="aiConfigInfo.provider" size="small" type="info" effect="plain" round>{{ aiConfigInfo.provider }}</el-tag>
+          <div class="ai-config-meta">
+            <span>大模型配置</span>
+            <!-- <div v-if="aiConfigSummary" class="ai-config-tags">
+              <el-tag size="small" type="success" effect="plain" round>本 {{ aiConfigSummary.local }}</el-tag>
+              <el-tag size="small" type="info" effect="plain" round>线 {{ aiConfigSummary.online }}</el-tag>
+            </div> -->
+          </div>
         </div>
       </div>
     </div>
@@ -106,6 +157,12 @@
         :source-lang="termLibrarySystem ? undefined : currentTask?.source_lang"
         :target-lang="termLibrarySystem ? undefined : currentTask?.target_lang"
         @back="closePanel"
+      />
+      <DocumentLibraryView
+        v-else-if="panelMode === 'documents'"
+        @back="closePanel"
+        @open="openDocumentFromLibrary"
+        @changed="onDocumentLibraryChanged"
       />
       <StoryStructurePanel
         v-else-if="panelMode === 'story' && currentTask?.id"
@@ -158,6 +215,13 @@
                 round
                 class="type-badge"
               >{{ getTypeName(currentTask.literary_type) }}</el-tag>
+              <el-tag
+                v-if="currentTask.collab_mode"
+                size="small"
+                :type="currentTask.collab_mode === 'local' ? 'success' : currentTask.collab_mode === 'collab' ? 'warning' : 'info'"
+                effect="plain"
+                round
+              >{{ collabModeLabel(currentTask.collab_mode) }}</el-tag>
 
               <el-divider direction="vertical" />
 
@@ -207,7 +271,7 @@
                   </template>
                 </div>
               </el-popover>
-              <el-tooltip content="定稿" placement="bottom">
+              <el-tooltip content="定稿勘误" placement="bottom">
                 <el-button circle class="icon-btn" @click="goToResultPage">
                   <el-icon><Document /></el-icon>
                 </el-button>
@@ -424,26 +488,39 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="翻译类型">
-              <el-select v-model="newTaskForm.literary_type" style="width: 100%;">
-                <el-option-group label="文学">
-                  <el-option label="一般" value="general" />
-                  <el-option label="诗歌" value="poetry" />
-                  <el-option label="散文" value="prose" />
-                  <el-option label="小说" value="novel" />
-                  <el-option label="戏剧" value="drama" />
-                </el-option-group>
-                <el-option-group label="专业">
-                  <el-option label="科技" value="tech" />
-                  <el-option label="商业" value="business" />
-                  <el-option label="贸易" value="trade" />
-                  <el-option label="法律" value="legal" />
-                  <el-option label="医学" value="medical" />
-                </el-option-group>
+            <el-form-item label="分组（选填）">
+              <el-select
+                v-model="newTaskForm.group_name"
+                style="width: 100%;"
+                filterable
+                allow-create
+                clearable
+                default-first-option
+                placeholder="选择或输入分组名"
+              >
+                <el-option v-for="g in namedGroups" :key="g.name" :label="g.name" :value="g.name" />
               </el-select>
             </el-form-item>
           </el-col>
         </el-row>
+        <el-form-item label="翻译类型">
+          <el-select v-model="newTaskForm.literary_type" style="width: 100%;">
+            <el-option-group label="文学">
+              <el-option label="一般" value="general" />
+              <el-option label="诗歌" value="poetry" />
+              <el-option label="散文" value="prose" />
+              <el-option label="小说" value="novel" />
+              <el-option label="戏剧" value="drama" />
+            </el-option-group>
+            <el-option-group label="专业">
+              <el-option label="科技" value="tech" />
+              <el-option label="商业" value="business" />
+              <el-option label="贸易" value="trade" />
+              <el-option label="法律" value="legal" />
+              <el-option label="医学" value="medical" />
+            </el-option-group>
+          </el-select>
+        </el-form-item>
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="源语言">
@@ -472,6 +549,14 @@
         </el-form-item>
         <el-form-item label="翻译需求（选填）">
           <el-input v-model="newTaskForm.user_requirements" type="textarea" :rows="2" placeholder="如：偏书面语、保留专有名词原文、统一某术语译法等" maxlength="500" show-word-limit />
+        </el-form-item>
+        <el-form-item label="模型模式">
+          <el-radio-group v-model="newTaskForm.collab_mode">
+            <el-radio-button label="online">全部线上</el-radio-button>
+            <el-radio-button label="local">全部本地</el-radio-button>
+            <el-radio-button label="collab">混合</el-radio-button>
+          </el-radio-group>
+          <p class="form-hint">混合：本地预译，线上校验/修改/定稿。开始翻译时仍可再改。</p>
         </el-form-item>
         <el-form-item label="原文">
           <el-upload
@@ -553,6 +638,14 @@
         <el-form-item label="翻译需求（选填）">
           <el-input v-model="batchUploadForm.user_requirements" type="textarea" :rows="2" placeholder="如：偏书面语、保留专有名词原文" maxlength="500" show-word-limit />
         </el-form-item>
+        <el-form-item label="模型模式">
+          <el-radio-group v-model="batchUploadForm.collab_mode">
+            <el-radio-button label="online">全部线上</el-radio-button>
+            <el-radio-button label="local">全部本地</el-radio-button>
+            <el-radio-button label="collab">混合</el-radio-button>
+          </el-radio-group>
+          <p class="form-hint">混合：本地预译 + 线上润色。对本次上传的全部任务生效。</p>
+        </el-form-item>
         <el-form-item label="上传后自动执行四步流程">
           <el-switch v-model="batchUploadForm.auto_run" />
         </el-form-item>
@@ -584,10 +677,38 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showEditTask" title="修改任务" width="400px" destroy-on-close>
+    <el-dialog v-model="showStartModeDialog" title="选择模型模式" width="420px" destroy-on-close>
+      <p class="form-hint" style="margin-top: 0;">本次翻译使用哪套模型？</p>
+      <el-radio-group v-model="startModeForm.collab_mode" class="start-mode-group">
+        <el-radio label="online" border>全部线上<span class="mode-desc">{{ aiConfigSummary?.online || '线上模型' }}</span></el-radio>
+        <el-radio label="local" border>全部本地<span class="mode-desc">{{ aiConfigSummary?.local || '本地模型' }}</span></el-radio>
+        <el-radio label="collab" border>混合<span class="mode-desc">本地预译 + 线上润色</span></el-radio>
+      </el-radio-group>
+      <template #footer>
+        <el-button @click="showStartModeDialog = false">取消</el-button>
+        <el-button type="primary" :loading="processing || batchStarting" @click="confirmStartWithMode">
+          {{ startModeForm.batch ? `开始 ${selectedTaskIds.length} 个任务` : '开始翻译' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showEditTask" title="修改任务" width="420px" destroy-on-close>
       <el-form v-if="editingTask" label-position="top">
         <el-form-item label="标题">
           <el-input v-model="editForm.title" placeholder="选填" maxlength="200" />
+        </el-form-item>
+        <el-form-item label="分组">
+          <el-select
+            v-model="editForm.group_name"
+            style="width: 100%;"
+            filterable
+            allow-create
+            clearable
+            default-first-option
+            placeholder="选择或输入分组名"
+          >
+            <el-option v-for="g in namedGroups" :key="g.name" :label="g.name" :value="g.name" />
+          </el-select>
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="editForm.status" style="width: 100%;">
@@ -603,25 +724,38 @@
       </template>
     </el-dialog>
 
+    <GroupManagerDialog v-model="showGroupManager" @changed="onGroupsChanged" />
+
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, inject } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, inject, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Upload, Document, Plus, List, Setting, Collection, Memo, Brush, VideoPlay, VideoPause, Trophy, Grid, DocumentCopy, View, Select, Sunny, RefreshRight } from '@element-plus/icons-vue'
+import { Edit, Delete, Upload, Document, Plus, List, Setting, Collection, Memo, Brush, VideoPlay, VideoPause, Trophy, Grid, DocumentCopy, View, Select, Sunny, RefreshRight, FolderOpened } from '@element-plus/icons-vue'
 import { literaryApi, translateApi, systemApi } from '@/api'
 import TermLibraryView from '@/views/TermLibraryView.vue'
+import DocumentLibraryView from '@/views/DocumentLibraryView.vue'
 import StoryStructurePanel from '@/components/StoryStructurePanel.vue'
 import StyleAgentsView from '@/views/StyleAgentsView.vue'
 import StyleAgentPicker from '@/components/StyleAgentPicker.vue'
+import GroupManagerDialog from '@/components/GroupManagerDialog.vue'
 import AIConfigView from '@/views/AIConfigView.vue'
 import LiteraryResultView from '@/views/LiteraryResultView.vue'
 
 const openThemeSettings = inject<() => void>('openThemeSettings', () => {})
+const route = useRoute()
+const router = useRouter()
 
 const languages = ref<{ code: string; name: string }[]>([])
 const taskList = ref<any[]>([])
+const taskTotal = ref(0)
+const taskPage = ref(1)
+const TASK_PAGE_SIZE = 15
+const groupOptions = ref<Array<{ id?: number | null; name: string; count: number }>>([])
+const selectedGroup = ref('')
+const showGroupManager = ref(false)
 const currentTask = ref<any>(null)
 const paragraphs = ref<any[]>([])
 const paragraphPage = ref(1)
@@ -632,7 +766,7 @@ const selectedParagraphId = ref<number | null>(null)
 const rightMode = ref<'read' | 'bulk'>('read')
 const miniEditId = ref<number | null>(null)
 const retranslatingId = ref<number | null>(null)
-const panelMode = ref<'workspace' | 'terms' | 'story' | 'style' | 'ai-config' | 'result'>('workspace')
+const panelMode = ref<'workspace' | 'terms' | 'story' | 'style' | 'ai-config' | 'result' | 'documents'>('workspace')
 const stylePickerReloadToken = ref(0)
 const fullSource = ref('')
 const fullTranslation = ref('')
@@ -648,7 +782,7 @@ const showExport = ref(false)
 const showCreateDialog = ref(false)
 const showEditTask = ref(false)
 const editingTask = ref<any>(null)
-const editForm = ref({ title: '', status: '' })
+const editForm = ref({ title: '', group_name: '', status: '' })
 const exportFormat = ref('txt')
 const exportWithSource = ref(false)
 
@@ -671,8 +805,30 @@ const batchUploadForm = ref({
   user_requirements: '',
   style_agent_id: undefined as number | undefined,
   auto_run: true,
+  collab_mode: 'online' as 'online' | 'local' | 'collab',
 })
 const aiConfigInfo = ref<any>({ provider: '', source: '', has_api_key: false, api_key_masked: '' })
+const showStartModeDialog = ref(false)
+const startModeForm = ref({
+  collab_mode: 'online' as 'online' | 'local' | 'collab',
+  batch: false,
+})
+
+const aiConfigSummary = computed(() => {
+  const info = aiConfigInfo.value
+  if (!info?.provider && !info?.draft_provider) return null
+  const localModel = info.draft_model || '本地'
+  const onlineModel = info.model || '线上'
+  return {
+    local: `${info.draft_provider || 'ollama'}/${localModel}`,
+    online: `${info.provider || '?'}/${onlineModel}`,
+  }
+})
+
+function defaultCollabMode(): 'online' | 'local' | 'collab' {
+  const m = aiConfigInfo.value?.collab_mode
+  return m === 'local' || m === 'collab' ? m : 'online'
+}
 
 async function loadAIConfig() {
   try {
@@ -689,6 +845,7 @@ function openBatchUpload() {
     user_requirements: '',
     style_agent_id: undefined,
     auto_run: true,
+    collab_mode: defaultCollabMode(),
   }
   batchFileList.value = []
   showBatchUploadDialog.value = true
@@ -716,6 +873,7 @@ async function submitBatchUpload() {
     form.append('target_lang', batchUploadForm.value.target_lang)
     form.append('literary_type', batchUploadForm.value.literary_type)
     form.append('auto_run', String(batchUploadForm.value.auto_run))
+    form.append('collab_mode', batchUploadForm.value.collab_mode)
     if (batchUploadForm.value.user_requirements?.trim()) {
       form.append('user_requirements', batchUploadForm.value.user_requirements.trim())
     }
@@ -739,11 +897,9 @@ async function submitBatchUpload() {
   }
 }
 
-const filteredTaskList = computed(() => {
-  if (categoryGroup.value === 'all') return taskList.value
-  if (categoryGroup.value === 'literary') return taskList.value.filter((t: any) => LITERARY_TYPES.has(t.literary_type || 'general'))
-  return taskList.value.filter((t: any) => !LITERARY_TYPES.has(t.literary_type || 'general'))
-})
+const namedGroups = computed(() => groupOptions.value.filter((g) => g.name))
+
+const filteredTaskList = computed(() => taskList.value)
 
 const TYPE_LABELS: Record<string, string> = {
   poetry: '诗歌', prose: '散文', novel: '小说', drama: '戏剧', general: '一般',
@@ -752,17 +908,21 @@ const TYPE_LABELS: Record<string, string> = {
 const getTypeName = (type: string) => TYPE_LABELS[type] || type
 const isLiteraryType = (type: string) => LITERARY_TYPES.has(type || 'general')
 const isStoryType = (type: string) => STORY_TYPES.has(type || '')
+const collabModeLabel = (mode: string) =>
+  mode === 'local' ? '全部本地' : mode === 'collab' ? '混合' : '全部线上'
 
 const newTaskForm = ref({
   title: '',
+  group_name: '',
   source_text: '',
   source_lang: 'en',
   target_lang: 'zh',
   literary_type: 'general' as string,
   user_requirements: '',
   style_agent_id: undefined as number | undefined,
+  collab_mode: 'online' as 'online' | 'local' | 'collab',
 })
-const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
+const uploadAccept = '.txt,.md,.doc,.docx,.pdf,.mobi,.azw,.azw3,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg'
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const MAX_TEXT_CHARS = 1000000
 
@@ -799,7 +959,7 @@ const paraProgress = ref<{ total: number; done: number }>({ total: 0, done: 0 })
 const workflowLoading = ref(false)
 
 const stepItems = computed(() => {
-  const labels = ['翻译', '校验', '润色', '定稿']
+  const labels = ['翻译', '校验', '润色', '定稿勘误']
   const statusMap: Record<string, number> = { translating: 0, verifying: 1, revising: 2, finalizing: 3 }
   const active = currentStep.value
   const runningIdx = statusMap[currentTask.value?.status] ?? -1
@@ -829,6 +989,20 @@ const goToTermLibrary = () => {
 const goToGlobalDictionary = () => {
   termLibrarySystem.value = true
   panelMode.value = 'terms'
+}
+
+const goToDocuments = () => {
+  panelMode.value = 'documents'
+}
+
+const openDocumentFromLibrary = async (task: any) => {
+  panelMode.value = 'workspace'
+  await selectTask(task)
+}
+
+const onDocumentLibraryChanged = async () => {
+  await loadGroups()
+  await loadTasks()
 }
 
 const goToStoryPage = () => {
@@ -922,12 +1096,21 @@ const toggleMiniEdit = async (para: any) => {
 onMounted(async () => {
   loadLanguages()
   loadAIConfig()
+  await loadGroups()
   await loadTasks()
+  await openTaskFromQuery()
   // 仅当仍有进行中的任务时恢复轮询，避免空闲进页误报「全部完成」
   if (taskList.value.some((t: any) => isTaskRunning(t.status))) {
     startBatchPolling()
   }
 })
+
+watch(
+  () => route.query.task,
+  async () => {
+    await openTaskFromQuery()
+  }
+)
 
 const loadLanguages = async () => {
   try {
@@ -938,11 +1121,37 @@ const loadLanguages = async () => {
   }
 }
 
+const buildListParams = (page = taskPage.value) => {
+  const params: Record<string, string | number> = {
+    skip: (page - 1) * TASK_PAGE_SIZE,
+    limit: TASK_PAGE_SIZE,
+  }
+  if (categoryGroup.value && categoryGroup.value !== 'all') {
+    params.category = categoryGroup.value
+  }
+  if (selectedGroup.value) {
+    params.group_name = selectedGroup.value
+  }
+  return params
+}
+
+const loadGroups = async () => {
+  try {
+    const response = await literaryApi.listTranslationGroups({
+      category: categoryGroup.value !== 'all' ? categoryGroup.value : undefined,
+    })
+    groupOptions.value = response.data || []
+  } catch {
+    groupOptions.value = []
+  }
+}
+
 const loadTasks = async (autoSelect = false) => {
   loadingTasks.value = true
   try {
-    const response = await literaryApi.listTranslations({ limit: 50 })
-    taskList.value = response.data
+    const response = await literaryApi.listTranslations(buildListParams())
+    taskList.value = response.data.items || []
+    taskTotal.value = response.data.total || 0
     if (autoSelect && taskList.value.length > 0 && !currentTask.value) {
       await selectTask(taskList.value[0])
     }
@@ -953,19 +1162,74 @@ const loadTasks = async (autoSelect = false) => {
   }
 }
 
+const onFilterChange = async () => {
+  taskPage.value = 1
+  await loadGroups()
+  await loadTasks()
+}
+
+const onGroupsChanged = async () => {
+  await loadGroups()
+  // 若当前筛选的分组已被重命名/删除，回到全部
+  if (
+    selectedGroup.value &&
+    selectedGroup.value !== '__ungrouped__' &&
+    !namedGroups.value.some((g) => g.name === selectedGroup.value)
+  ) {
+    selectedGroup.value = ''
+  }
+  await loadTasks()
+}
+
+const onTaskPageChange = async (page: number) => {
+  taskPage.value = page
+  await loadTasks()
+}
+
+const openTaskFromQuery = async () => {
+  const raw = route.query.task
+  const id = Number(Array.isArray(raw) ? raw[0] : raw)
+  if (!id || Number.isNaN(id)) return
+  try {
+    if (currentTask.value?.id !== id) {
+      await selectTask({ id })
+    }
+    if (route.query.task) {
+      router.replace({ path: '/', query: {} })
+    }
+  } catch {
+    ElMessage.error('打开文档失败')
+  }
+}
+
+const paragraphDisplayText = (p: any) =>
+  p.user_edited_text ||
+  p.translated_text ||
+  p.step4_finalization ||
+  p.step3_revision ||
+  p.step2_verification ||
+  p.step1_translation ||
+  ''
+
 const mapParagraph = (p: any, previous?: any) => ({
   ...p,
-  editedText: previous?.dirty ? previous.editedText : (p.user_edited_text || p.translated_text || ''),
+  editedText: previous?.dirty ? previous.editedText : paragraphDisplayText(p),
   dirty: previous?.dirty || false,
 })
 
-const loadParagraphPage = async (page = paragraphPage.value, silent = false) => {
+const loadParagraphPage = async (
+  page = paragraphPage.value,
+  silent = false,
+  options?: { resetLocal?: boolean },
+) => {
   if (!currentTask.value) return
   if (!silent) loadingParagraphs.value = true
   try {
     const skip = (page - 1) * PAGE_SIZE
     const response = await literaryApi.getParagraphs(currentTask.value.id, { skip, limit: PAGE_SIZE })
-    const previous = new Map(paragraphs.value.map((item: any) => [item.id, item]))
+    const previous = options?.resetLocal
+      ? new Map()
+      : new Map(paragraphs.value.map((item: any) => [item.id, item]))
     paragraphPage.value = page
     paragraphTotal.value = response.data.total
     paragraphs.value = (response.data.items || []).map((item: any) => mapParagraph(item, previous.get(item.id)))
@@ -1058,20 +1322,23 @@ const selectTask = async (task: any, options?: { keepPage?: boolean; silent?: bo
 
 const createNewTask = () => {
   const defaultType = categoryGroup.value === 'professional' ? 'tech' : 'general'
+  const defaultGroup = selectedGroup.value && selectedGroup.value !== '__ungrouped__' ? selectedGroup.value : ''
   newTaskForm.value = {
     title: '',
+    group_name: defaultGroup,
     source_text: '',
     source_lang: 'en',
     target_lang: 'zh',
     literary_type: defaultType,
     user_requirements: '',
     style_agent_id: undefined,
+    collab_mode: defaultCollabMode(),
   }
   showCreateDialog.value = true
 }
 
-const allowedUploadExtensions = new Set(['txt', 'md', 'markdown', 'text', 'doc', 'docx', 'pdf', 'mobi', 'azw', 'html', 'htm', 'xml', 'json', 'csv', 'log', 'rst', 'tex', 'srt', 'sub', 'vtt', 'yaml', 'yml', 'ini', 'cfg', 'properties'])
-const binaryUploadExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw'])
+const allowedUploadExtensions = new Set(['txt', 'md', 'markdown', 'text', 'doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3', 'html', 'htm', 'xml', 'json', 'csv', 'log', 'rst', 'tex', 'srt', 'sub', 'vtt', 'yaml', 'yml', 'ini', 'cfg', 'properties'])
+const binaryUploadExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3'])
 const onCreateFileSelect = async (opts: { raw: File }) => {
   const file = opts?.raw
   if (!file) return
@@ -1098,8 +1365,9 @@ const onCreateFileSelect = async (opts: { raw: File }) => {
       }
       if (!newTaskForm.value.title) newTaskForm.value.title = (file.name || '').replace(/\.[^.]+$/, '')
       if (newTaskForm.value.source_text) ElMessage.success('文件已解析')
-    } catch (e) {
-      ElMessage.error('文件解析失败')
+      else ElMessage.error('未能从文件中提取到正文')
+    } catch (e: any) {
+      ElMessage.error(e?.response?.data?.detail || '文件解析失败')
     }
     return
   }
@@ -1125,16 +1393,19 @@ const submitNewTask = async () => {
   try {
     const payload = {
       title: newTaskForm.value.title || undefined,
+      group_name: newTaskForm.value.group_name?.trim() || undefined,
       source_text: newTaskForm.value.source_text,
       source_lang: newTaskForm.value.source_lang,
       target_lang: newTaskForm.value.target_lang,
       literary_type: newTaskForm.value.literary_type,
       user_requirements: newTaskForm.value.user_requirements?.trim() || undefined,
       style_agent_id: newTaskForm.value.style_agent_id,
+      collab_mode: newTaskForm.value.collab_mode,
     }
     const response = await literaryApi.createTranslation(payload)
     ElMessage.success('任务创建成功')
     showCreateDialog.value = false
+    await loadGroups()
     await loadTasks()
     await selectTask(response.data)
   } catch (error) {
@@ -1146,7 +1417,11 @@ const submitNewTask = async () => {
 
 const openEditTaskDialog = (task: any) => {
   editingTask.value = task
-  editForm.value = { title: task.title || '', status: task.status || 'pending' }
+  editForm.value = {
+    title: task.title || '',
+    group_name: task.group_name || '',
+    status: task.status || 'pending',
+  }
   showEditTask.value = true
 }
 
@@ -1154,14 +1429,20 @@ const submitEditTask = async () => {
   if (!editingTask.value) return
   const id = editingTask.value.id
   try {
-    await literaryApi.updateTranslation(id, { title: editForm.value.title || undefined, status: editForm.value.status || undefined })
+    await literaryApi.updateTranslation(id, {
+      title: editForm.value.title || undefined,
+      group_name: editForm.value.group_name?.trim() || null,
+      status: editForm.value.status || undefined,
+    })
     ElMessage.success('已保存')
     showEditTask.value = false
     editingTask.value = null
+    await loadGroups()
     await loadTasks()
     if (currentTask.value?.id === id) {
       const t = taskList.value.find((x: any) => x.id === id)
       if (t) await selectTask(t)
+      else await selectTask({ id })
     }
   } catch (e) {
     ElMessage.error('保存失败')
@@ -1173,13 +1454,14 @@ const confirmDeleteTask = async (task: any) => {
     await ElMessageBox.confirm('确定删除该翻译任务？', '删除确认', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
     await literaryApi.deleteTranslation(task.id)
     ElMessage.success('已删除')
-    taskList.value = taskList.value.filter((t: any) => t.id !== task.id)
     if (currentTask.value?.id === task.id) {
       currentTask.value = null
       paragraphs.value = []
       paragraphTotal.value = 0
       paragraphPage.value = 1
     }
+    await loadGroups()
+    await loadTasks()
   } catch (e) {
     if (e !== 'cancel') ElMessage.error('删除失败')
   }
@@ -1210,34 +1492,60 @@ const toggleTaskSelection = (id: number) => {
 
 const startBatchWorkflow = async () => {
   if (selectedTaskIds.value.length === 0) return
-  batchStarting.value = true
-  try {
-    await literaryApi.startBatchWorkflow(selectedTaskIds.value)
-    ElMessage.success(`已启动 ${selectedTaskIds.value.length} 个任务的翻译队列`)
-    exitBatchMode()
-    await loadTasks()
-    startBatchPolling(true)
-  } catch (error: any) {
-    ElMessage.error(error?.response?.data?.detail || '批量启动失败')
-  } finally {
-    batchStarting.value = false
-  }
+  startModeForm.value = { collab_mode: defaultCollabMode(), batch: true }
+  showStartModeDialog.value = true
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let lastPolledStep = 0
 
 const startWorkflow = async () => {
+  if (!currentTask.value) return
+  const taskMode = currentTask.value.collab_mode
+  startModeForm.value = {
+    collab_mode:
+      taskMode === 'online' || taskMode === 'local' || taskMode === 'collab'
+        ? taskMode
+        : defaultCollabMode(),
+    batch: false,
+  }
+  showStartModeDialog.value = true
+}
+
+const confirmStartWithMode = async () => {
+  const mode = startModeForm.value.collab_mode
+  if (startModeForm.value.batch) {
+    batchStarting.value = true
+    try {
+      await literaryApi.startBatchWorkflow(selectedTaskIds.value, mode)
+      ElMessage.success(`已启动 ${selectedTaskIds.value.length} 个任务的翻译队列`)
+      showStartModeDialog.value = false
+      exitBatchMode()
+      await loadTasks()
+      startBatchPolling(true)
+    } catch (error: any) {
+      ElMessage.error(error?.response?.data?.detail || '批量启动失败')
+    } finally {
+      batchStarting.value = false
+    }
+    return
+  }
+  if (!currentTask.value) return
   processing.value = true
   try {
-    await literaryApi.startWorkflow(currentTask.value.id)
-    currentTask.value.status = 'translating'
-    currentTask.value.current_step = 1
-    workflowLoading.value = true
+    const startRes = await literaryApi.startWorkflow(currentTask.value.id, { collab_mode: mode })
+    currentTask.value.status = startRes.data?.status || 'translating'
+    currentTask.value.current_step = startRes.data?.resume_step || currentTask.value.current_step || 1
+    currentTask.value.collab_mode = mode
+    currentTask.value.error_message = null
+    showStartModeDialog.value = false
+    miniEditId.value = null
+    // 保留已有译文，从服务端同步；未译段落会继续翻译
+    await loadParagraphPage(paragraphPage.value, true, { resetLocal: true })
+    if (compareMode.value === 'full') await loadFullText()
     startPolling()
   } catch (error: any) {
-    const msg = error?.response?.data?.detail || '启动翻译失败'
-    ElMessage.error(msg)
+    ElMessage.error(error?.response?.data?.detail || '启动翻译失败')
   } finally {
     processing.value = false
   }
@@ -1260,43 +1568,54 @@ const stopWorkflow = async () => {
   }
 }
 
+const pollWorkflowOnce = async () => {
+  if (!currentTask.value) return stopPolling()
+  try {
+    const res = await literaryApi.getWorkflowStatus(currentTask.value.id)
+    const data = res.data
+    workflowLoading.value = false
+    const prevStep = lastPolledStep
+    currentTask.value.status = data.overall_status
+    currentTask.value.current_step = data.current_step
+    lastPolledStep = data.current_step
+
+    const taskInList = taskList.value.find((t: any) => t.id === currentTask.value.id)
+    if (taskInList) {
+      taskInList.status = data.overall_status
+      taskInList.current_step = data.current_step
+    }
+
+    paraProgress.value = { total: data.paragraph_total || 0, done: data.paragraph_done || 0 }
+
+    const finished = data.overall_status === 'completed' || data.overall_status === 'failed'
+    if (finished) {
+      stopPolling()
+      paraProgress.value = { total: 0, done: 0 }
+      await refreshTask()
+      await loadTasks()
+      ElMessage[data.overall_status === 'completed' ? 'success' : 'error'](
+        data.overall_status === 'completed' ? '翻译流程已完成' : '翻译流程失败'
+      )
+      return
+    }
+
+    // 翻译进行中始终刷新段落，才能看到逐段落库的译文
+    if (data.current_step !== prevStep) {
+      await refreshTask()
+    } else {
+      await loadParagraphPage(paragraphPage.value, true)
+      if (compareMode.value === 'full') await loadFullText()
+    }
+  } catch (error) {
+    console.error('Polling error:', error)
+  }
+}
+
 const startPolling = () => {
   stopPolling()
   lastPolledStep = currentTask.value?.current_step || 0
-  pollTimer = setInterval(async () => {
-    if (!currentTask.value) return stopPolling()
-    try {
-      const res = await literaryApi.getWorkflowStatus(currentTask.value.id)
-      const data = res.data
-      workflowLoading.value = false
-      const prevStep = lastPolledStep
-      currentTask.value.status = data.overall_status
-      currentTask.value.current_step = data.current_step
-      lastPolledStep = data.current_step
-
-      const taskInList = taskList.value.find((t: any) => t.id === currentTask.value.id)
-      if (taskInList) { taskInList.status = data.overall_status; taskInList.current_step = data.current_step }
-
-      paraProgress.value = { total: data.paragraph_total || 0, done: data.paragraph_done || 0 }
-
-      const finished = data.overall_status === 'completed' || data.overall_status === 'failed'
-      if (finished) {
-        stopPolling()
-        paraProgress.value = { total: 0, done: 0 }
-        await refreshTask()
-        await loadTasks()
-        ElMessage[data.overall_status === 'completed' ? 'success' : 'error'](
-          data.overall_status === 'completed' ? '翻译流程已完成' : '翻译流程失败'
-        )
-      } else if (data.current_step !== prevStep) {
-        await refreshTask()
-      } else {
-        await loadParagraphPage(paragraphPage.value, true)
-      }
-    } catch (error) {
-      console.error('Polling error:', error)
-    }
-  }, 12000)
+  void pollWorkflowOnce()
+  pollTimer = setInterval(() => { void pollWorkflowOnce() }, 3000)
 }
 
 const stopPolling = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null } }
@@ -1397,7 +1716,7 @@ const exportTranslation = async () => {
 }
 
 const getStatusType = (status: string) => ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
-const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿勘误中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 </script>
 
 <style scoped lang="scss">
@@ -1418,11 +1737,11 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 }
 
 .sidebar-header {
-  padding: 16px 14px 14px 16px;
+  padding: 16px 14px 12px 16px;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
   border-bottom: 1px solid var(--ins-line);
 
   .brand-wrap {
@@ -1430,18 +1749,19 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
     align-items: center;
     gap: 10px;
     min-width: 0;
+    width: 100%;
   }
 
   .logo-mark {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
+    width: 40px;
+    height: 40px;
+    border-radius: 11px;
     background: var(--ins-grad);
     flex-shrink: 0;
     display: grid;
     place-items: center;
     color: #fff;
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 700;
     box-shadow: 0 2px 8px rgba(var(--ins-primary-rgb), 0.28);
   }
@@ -1453,7 +1773,7 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   }
 
   .brand {
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 700;
     color: var(--ins-ink);
     line-height: 1.2;
@@ -1464,18 +1784,24 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
     font-size: 11px;
     color: var(--ins-muted);
     font-weight: 500;
+    margin-top: 2px;
   }
 
   .header-btns {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 4px;
+    width: 100%;
   }
 }
 
 .category-filter {
   padding: 12px 12px 8px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 
   .category-group {
     width: 100%;
@@ -1500,6 +1826,35 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
       color: #fff;
     }
   }
+
+  .group-select {
+    width: 100%;
+  }
+
+  .group-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+
+    .group-select {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+}
+
+.sidebar-pager {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--ins-line);
+  display: flex;
+  justify-content: center;
+
+  :deep(.el-pagination) {
+    --el-pagination-button-width: 24px;
+    --el-pagination-button-height: 24px;
+    font-size: 12px;
+  }
 }
 
 .sidebar-footer-row {
@@ -1522,10 +1877,67 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
     background: rgba(var(--ins-primary-rgb), 0.06);
     color: var(--ins-ink);
   }
+  &.active {
+    background: rgba(var(--ins-primary-rgb), 0.1);
+    color: var(--el-color-primary);
+  }
   .el-icon { font-size: 16px; }
   .el-tag { margin-left: auto; }
   & + .sidebar-footer {
     border-top: 1px solid var(--ins-line);
+  }
+
+  &.ai-config-entry {
+    align-items: flex-start;
+    .el-icon { margin-top: 2px; }
+  }
+}
+
+.ai-config-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  > span { line-height: 1.3; }
+}
+
+.ai-config-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+
+  .el-tag {
+    margin-left: 0;
+    max-width: 100%;
+    height: auto;
+    white-space: normal;
+    line-height: 1.3;
+    padding: 2px 6px;
+  }
+}
+
+.start-mode-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+
+  :deep(.el-radio) {
+    margin-right: 0;
+    width: 100%;
+    height: auto;
+    padding: 10px 12px;
+    align-items: flex-start;
+  }
+
+  .mode-desc {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--ins-muted);
+    font-weight: 400;
   }
 }
 

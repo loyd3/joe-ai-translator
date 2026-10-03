@@ -7,7 +7,7 @@
         size="small"
         clearable
         placeholder="项目分类"
-        style="width: 140px;"
+        class="type-select"
       >
         <el-option-group label="文学">
           <el-option label="一般" value="general" />
@@ -26,47 +26,46 @@
       </el-select>
       <el-input
         v-model="searchQuery"
-        placeholder="搜索词汇..."
+        placeholder="搜索源词、译文或说明..."
         size="small"
         clearable
         class="search-input"
       >
         <template #prefix><el-icon><Search /></el-icon></template>
       </el-input>
-      <el-button type="primary" size="small" @click="showAddDialog = true">
+      <el-button type="primary" size="small" class="add-btn" @click="showAddDialog = true">
         <el-icon><Plus /></el-icon>
+        添加
       </el-button>
     </div>
 
     <div class="category-bar" v-if="categories.length > 0">
-      <el-tag
+      <button
+        type="button"
+        class="cat-chip"
+        :class="{ active: !selectedCategory }"
+        @click="selectedCategory = ''"
+      >全部</button>
+      <button
         v-for="cat in visibleCategories"
         :key="cat"
-        :effect="selectedCategory === cat ? 'dark' : 'plain'"
-        :type="selectedCategory === cat ? 'primary' : 'info'"
-        size="small"
-        round
-        class="cat-tag"
+        type="button"
+        class="cat-chip"
+        :class="{ active: selectedCategory === cat }"
         @click="selectedCategory = selectedCategory === cat ? '' : cat"
-      >{{ cat }}</el-tag>
-      <el-tag
+      >{{ cat }}</button>
+      <button
         v-if="categories.length > maxVisibleCats && !catsExpanded"
-        size="small"
-        type="info"
-        effect="plain"
-        round
-        class="cat-tag cat-toggle"
+        type="button"
+        class="cat-chip is-toggle"
         @click="catsExpanded = true"
-      >+{{ categories.length - maxVisibleCats }} 更多</el-tag>
-      <el-tag
+      >+{{ categories.length - maxVisibleCats }}</button>
+      <button
         v-if="catsExpanded && categories.length > maxVisibleCats"
-        size="small"
-        type="info"
-        effect="plain"
-        round
-        class="cat-tag cat-toggle"
+        type="button"
+        class="cat-chip is-toggle"
         @click="catsExpanded = false"
-      >收起</el-tag>
+      >收起</button>
     </div>
 
     <div class="term-list" v-loading="loading">
@@ -74,31 +73,31 @@
         v-for="term in filteredTerms"
         :key="term.id"
         class="term-row"
-        @mouseenter="hoveredTerm = term.id"
-        @mouseleave="hoveredTerm = null"
       >
-        <div class="term-pair">
-          <span class="source">{{ term.source_term }}</span>
-          <span class="sep">→</span>
-          <span class="target">{{ term.target_term }}</span>
+        <div class="term-main">
+          <div class="term-pair">
+            <span class="source">{{ term.source_term }}</span>
+            <span class="sep" aria-hidden="true">→</span>
+            <span class="target">{{ term.target_term }}</span>
+          </div>
+          <div class="term-extra">
+            <el-tag v-if="scope === 'global'" size="small" effect="plain" round>{{ typeLabel(term.literary_type) }}</el-tag>
+            <el-tag v-if="term.category" size="small" type="info" effect="plain" round>{{ term.category }}</el-tag>
+            <span class="desc" v-if="term.description">{{ term.description }}</span>
+          </div>
         </div>
-        <div class="term-extra">
-          <el-tag v-if="scope === 'global'" size="small" effect="plain" round>{{ typeLabel(term.literary_type) }}</el-tag>
-          <el-tag v-if="term.category" size="small" type="info" effect="plain" round>{{ term.category }}</el-tag>
-          <span class="desc" v-if="term.description">{{ term.description }}</span>
-        </div>
-        <div class="term-actions" v-show="hoveredTerm === term.id">
+        <div class="term-actions">
           <el-button v-if="scope === 'document'" link size="small" type="success" @click="promoteTerm(term)">入库</el-button>
           <el-button link size="small" @click="startEdit(term)"><el-icon><Edit /></el-icon></el-button>
           <el-button link type="danger" size="small" @click="deleteTerm(term)"><el-icon><Delete /></el-icon></el-button>
         </div>
       </div>
 
-      <el-empty v-if="filteredTerms.length === 0 && !loading" :description="emptyText" :image-size="60" />
+      <el-empty v-if="filteredTerms.length === 0 && !loading" :description="emptyText" :image-size="72" />
     </div>
 
     <div class="panel-footer">
-      <span>{{ filteredTerms.length }} 条词汇</span>
+      <span class="count">{{ filteredTerms.length }} 条词汇</span>
       <span class="footer-hint">{{ scope === 'document' ? '当前文档小词库' : '系统大词库' }}</span>
     </div>
 
@@ -183,7 +182,6 @@ const terms = ref<any[]>([])
 const categories = ref<string[]>([])
 const loading = ref(false)
 const saving = ref(false)
-const hoveredTerm = ref<number | null>(null)
 const editingId = ref<number | null>(null)
 const showAddDialog = ref(false)
 const searchQuery = ref('')
@@ -387,13 +385,29 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .panel-toolbar {
   display: flex;
   gap: 8px;
+  align-items: center;
   padding: 0 0 12px;
-  .search-input { flex: 1; }
+  flex-shrink: 0;
+
+  .type-select {
+    width: 132px;
+    flex-shrink: 0;
+  }
+
+  .search-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .add-btn {
+    flex-shrink: 0;
+  }
 }
 
 .category-bar {
@@ -401,14 +415,32 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 6px;
   padding-bottom: 12px;
+  flex-shrink: 0;
+}
 
-  .cat-tag {
-    cursor: pointer;
-    transition: all 0.15s;
+.cat-chip {
+  border: 1px solid var(--ins-line-strong, var(--ins-line));
+  background: transparent;
+  color: var(--ins-muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover {
+    color: var(--ins-ink);
+    border-color: rgba(var(--ins-primary-rgb), 0.35);
   }
 
-  .cat-toggle {
-    color: #909399;
+  &.active {
+    color: #fff;
+    background: var(--el-color-primary);
+    border-color: var(--el-color-primary);
+  }
+
+  &.is-toggle {
     border-style: dashed;
   }
 }
@@ -416,66 +448,122 @@ onMounted(() => {
 .term-list {
   flex: 1;
   overflow-y: auto;
-  margin: 0 -4px;
-  padding: 0 4px;
+  min-height: 0;
+  padding-right: 2px;
 }
 
 .term-row {
-  padding: 12px 14px;
-  border-radius: 8px;
-  position: relative;
-  transition: background 0.15s;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.15s;
 
-  &:hover { background: rgba(17, 17, 17, 0.03); }
-
-  & + .term-row { border-top: 1px solid var(--ins-line); }
-
-  .term-pair {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-    font-size: 15px;
-
-    .source { font-weight: 500; color: var(--ins-ink); }
-    .sep { color: var(--ins-muted); font-size: 13px; flex-shrink: 0; }
-    .target { color: var(--el-color-primary); font-weight: 600; }
+  & + .term-row {
+    margin-top: 2px;
   }
 
-  .term-extra {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 5px;
+  &:hover {
+    background: rgba(var(--ins-primary-rgb), 0.05);
+    border-color: rgba(var(--ins-primary-rgb), 0.12);
 
-    .desc {
-      font-size: 13px;
-      color: #999;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .term-actions {
+      opacity: 1;
     }
-  }
-
-  .term-actions {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    display: flex;
-    gap: 2px;
-    background: #f5f7fa;
-    border-radius: 4px;
-    padding: 2px;
   }
 }
 
+.term-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.term-pair {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 15px;
+  line-height: 1.4;
+
+  .source {
+    font-weight: 600;
+    color: var(--ins-ink);
+  }
+
+  .sep {
+    color: var(--ins-muted);
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+
+  .target {
+    color: var(--el-color-primary);
+    font-weight: 700;
+  }
+}
+
+.term-extra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  min-width: 0;
+
+  .desc {
+    font-size: 12px;
+    color: var(--ins-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.term-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0.35;
+  transition: opacity 0.15s;
+  padding-top: 2px;
+}
+
 .panel-footer {
-  padding: 12px 0 0;
-  border-top: 1px solid #f0f0f0;
-  font-size: 13px;
-  color: #999;
+  padding: 12px 2px 0;
+  margin-top: 8px;
+  border-top: 1px solid var(--ins-line);
+  font-size: 12px;
+  color: var(--ins-muted);
   display: flex;
   justify-content: space-between;
+  flex-shrink: 0;
 
-  .footer-hint { color: #c0c4cc; }
+  .count {
+    font-weight: 600;
+    color: var(--ins-ink);
+  }
+
+  .footer-hint {
+    color: var(--ins-muted);
+  }
+}
+
+@media (max-width: 640px) {
+  .term-actions {
+    opacity: 1;
+  }
+
+  .panel-toolbar {
+    flex-wrap: wrap;
+
+    .type-select,
+    .search-input,
+    .add-btn {
+      width: 100%;
+    }
+  }
 }
 </style>

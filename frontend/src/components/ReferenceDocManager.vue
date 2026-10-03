@@ -115,7 +115,7 @@
                 action="#"
                 :auto-upload="false"
                 :on-change="handleFileChange"
-                accept=".txt,.md,.doc,.docx,.pdf,.mobi,.azw,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg"
+                accept=".txt,.md,.doc,.docx,.pdf,.mobi,.azw,.azw3,.html,.htm,.xml,.json,.csv,.yaml,.yml,.rst,.tex,.srt,.vtt,.log,.ini,.cfg"
                 :limit="1"
               >
                 <el-icon class="el-icon--upload"><Upload /></el-icon>
@@ -210,7 +210,7 @@ const loadDocuments = async () => {
   }
 }
 
-const binaryExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw'])
+const binaryExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3'])
 const handleFileChange = async (file: any) => {
   const raw = file?.raw
   if (!raw) return
@@ -222,9 +222,10 @@ const handleFileChange = async (file: any) => {
       const res = await literaryApi.parseFile(formData)
       form.value.content = res.data?.text ?? ''
       if (!form.value.name) form.value.name = (file.name || '').replace(/\.[^.]+$/, '')
-      ElMessage.success('文件已解析')
-    } catch (e) {
-      ElMessage.error('文件解析失败')
+      if (form.value.content) ElMessage.success('文件已解析')
+      else ElMessage.error('未能从文件中提取到正文')
+    } catch (e: any) {
+      ElMessage.error(e?.response?.data?.detail || '文件解析失败')
     }
     return
   }

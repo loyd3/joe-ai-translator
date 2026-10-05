@@ -10,7 +10,7 @@
               <el-tag v-if="info.draft_has_api_key || form.draft_provider === 'ollama'" size="small" type="success">可用</el-tag>
               <el-tag v-else size="small" type="warning">待配置</el-tag>
             </div>
-            <div class="status-sub">{{ draftProviderMeta?.name || form.draft_provider }} · {{ form.draft_model || '未填模型' }}</div>
+            <div class="status-sub">Ollama · {{ form.draft_model || '未填模型' }}</div>
           </div>
         </div>
         <div class="status-plus">+</div>
@@ -36,36 +36,15 @@
     <div class="config-section draft-box">
       <div class="section-title">本地模型</div>
       <p class="hint">
-        用于全部本地，或混合模式的初译。Docker 访问本机 Ollama 请填
+        本地仅支持 Ollama。Docker 访问本机请填
         http://host.docker.internal:11434/v1。
-        质量建议：中英优先 <code>qwen2.5:14b</code>（显存够再用更大）；7B 偏稳但文采有限。系统会按模型规模自动选用提示策略，并提高 Ollama 上下文窗口。
+        质量建议：中英优先 <code>qwen2.5:14b</code>（显存够再用更大）；7B 偏稳但文采有限。
       </p>
-      <div class="provider-grid">
-        <button
-          v-for="p in providers"
-          :key="'draft-' + p.id"
-          type="button"
-          class="provider-card"
-          :class="{ active: form.draft_provider === p.id }"
-          @click="selectDraftProvider(p.id)"
-        >
-          <strong>{{ p.name }}</strong>
-          <span>{{ p.description }}</span>
-        </button>
-      </div>
       <el-form label-position="top" class="config-form">
-        <el-form-item :label="form.draft_provider === 'ollama' ? 'API Key（可选）' : 'API Key'">
-          <el-input
-            v-model="form.draft_api_key"
-            type="password"
-            show-password
-            :placeholder="info.draft_has_api_key ? `已配置（${info.draft_api_key_masked || '本地'}），留空保持不变` : '请输入 API Key'"
-          />
-        </el-form-item>
         <el-form-item label="模型">
-          <el-input v-model="form.draft_model" placeholder="例如 qwen2.5:7b" clearable />
+          <el-input v-model="form.draft_model" placeholder="例如 qwen2.5:14b" clearable />
         </el-form-item>
-        <el-form-item v-if="showDraftBaseUrl" :label="form.draft_provider === 'ollama' ? 'Ollama 地址' : 'API 地址'">
+        <el-form-item label="Ollama 地址">
           <el-input v-model="form.draft_base_url" placeholder="http://localhost:11434/v1" />
         </el-form-item>
         <el-form-item>
@@ -277,15 +256,6 @@ const showBaseUrl = computed(() => {
   return p === 'custom' || p === 'ollama' || !!currentProviderMeta.value?.allow_base_url_override
 })
 
-const draftProviderMeta = computed(() =>
-  providers.value.find((p) => p.id === form.value.draft_provider)
-)
-
-const showDraftBaseUrl = computed(() => {
-  const p = form.value.draft_provider
-  return p === 'custom' || p === 'ollama' || !!draftProviderMeta.value?.allow_base_url_override
-})
-
 const helpLinks = computed(() => {
   const meta = currentProviderMeta.value
   if (!meta?.docs_url) return []
@@ -315,7 +285,7 @@ async function load() {
       presence_penalty: data.presence_penalty ?? 0,
       timeout_seconds: data.timeout_seconds || 120,
       collab_mode: data.collab_mode || 'online',
-      draft_provider: data.draft_provider || 'ollama',
+      draft_provider: 'ollama',
       draft_api_key: '',
       draft_model: data.draft_model || 'llama3.2',
       draft_base_url: data.draft_base_url || 'http://localhost:11434/v1',
@@ -341,16 +311,6 @@ function selectProvider(id: string) {
   testResult.value = null
 }
 
-function selectDraftProvider(id: string) {
-  if (form.value.draft_provider === id) return
-  form.value.draft_provider = id
-  const meta = providers.value.find((p) => p.id === id)
-  form.value.draft_model = meta?.default_model || meta?.models?.[0] || ''
-  form.value.draft_base_url = meta?.base_url || ''
-  form.value.draft_api_key = ''
-  testResult.value = null
-}
-
 async function save() {
   if (form.value.provider !== 'ollama' && !form.value.api_key && !info.value.has_api_key) {
     ElMessage.warning('请先填写线上模型 API Key')
@@ -360,12 +320,8 @@ async function save() {
     ElMessage.warning('线上自定义提供商需要填写 API 地址')
     return
   }
-  if (form.value.draft_provider !== 'ollama' && !form.value.draft_api_key && !info.value.draft_has_api_key) {
-    ElMessage.warning('请先填写本地模型 API Key')
-    return
-  }
-  if (form.value.draft_provider === 'custom' && !form.value.draft_base_url.trim()) {
-    ElMessage.warning('本地自定义提供商需要填写 API 地址')
+  if (!form.value.draft_base_url.trim()) {
+    ElMessage.warning('请填写 Ollama 地址')
     return
   }
   saving.value = true
@@ -381,7 +337,7 @@ async function save() {
       presence_penalty: form.value.presence_penalty,
       timeout_seconds: form.value.timeout_seconds,
       collab_mode: form.value.collab_mode,
-      draft_provider: form.value.draft_provider,
+      draft_provider: 'ollama',
       draft_model: form.value.draft_model || undefined,
       draft_base_url: form.value.draft_base_url || undefined,
       draft_fallback: form.value.draft_fallback,
@@ -429,15 +385,11 @@ async function testConnection() {
 }
 
 async function testDraft() {
-  if (form.value.draft_provider !== 'ollama' && !form.value.draft_api_key && !info.value.draft_has_api_key) {
-    ElMessage.warning('请先填写本地模型 API Key')
-    return
-  }
   testingDraft.value = true
   testResult.value = null
   try {
     const res = await systemApi.testAIConfig({
-      provider: form.value.draft_provider,
+      provider: 'ollama',
       api_key: form.value.draft_api_key || undefined,
       model: form.value.draft_model || undefined,
       base_url: form.value.draft_base_url || undefined,

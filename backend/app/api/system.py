@@ -359,12 +359,7 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
         raise HTTPException(status_code=400, detail="翻译模式必须是 online、local 或 collab")
     db_cfg.collab_mode = mode
 
-    if request.draft_provider is not None:
-        if request.draft_provider not in catalog:
-            raise HTTPException(status_code=400, detail=f"不支持的本地提供商: {request.draft_provider}")
-        db_cfg.draft_provider = request.draft_provider
-    elif not (db_cfg.draft_provider or "").strip():
-        db_cfg.draft_provider = "ollama"
+    db_cfg.draft_provider = "ollama"
 
     if request.draft_api_key is not None and request.draft_api_key.strip():
         db_cfg.draft_api_key = request.draft_api_key.strip()

@@ -24,7 +24,7 @@ from app.schemas.schemas import (
     LiteraryTranslationListItem, LiteraryTranslationListPage, TranslationGroupItem,
     TranslationGroupCreate, TranslationGroupRename, TranslationGroupBulkAssign,
     LiteraryParagraphResponse, LiteraryParagraphPage,
-    ParagraphUpdateRequest, LiteraryTranslationUpdate, StoryProfileUpdate,
+    ParagraphUpdateRequest, RetranslateParagraphRequest, LiteraryTranslationUpdate, StoryProfileUpdate,
     ReferenceDocumentCreate, ReferenceDocumentResponse,
     ReferenceDocumentListItem, ReferenceDocumentUpdate,
     WorkflowStepResponse, LiteraryTranslationWorkflowResponse,
@@ -130,6 +130,21 @@ def _detect_resume_step(paragraphs: list) -> int:
     if any(not _para_has_text(getattr(p, "step4_finalization", None)) for p in paragraphs):
         return 4
     return 4
+
+
+def _clear_paragraph_translations(paragraphs: list) -> None:
+    """清空段落译文，供「重译」从头开始。"""
+    for para in paragraphs:
+        para.step1_translation = None
+        para.step2_verification = None
+        para.step3_revision = None
+        para.step4_finalization = None
+        para.translated_text = None
+        para.user_edited_text = None
+        para.is_edited = False
+        para.beauty_sound_score = None
+        para.beauty_word_score = None
+        para.beauty_meaning_score = None
 
 # ============================================================
 # 参考文档管理
@@ -617,6 +632,35 @@ async def list_translation_groups(
     return items
 
 
+@router.get("/translations/untranslated-ids")
+async def list_untranslated_translation_ids(
+    category: Optional[str] = Query(None, description="all|literary|professional"),
+    group_name: Optional[str] = Query(
+        None,
+        description="分组名；传 __ungrouped__ 表示未分组",
+    ),
+    q: Optional[str] = Query(None, description="标题模糊搜索"),
+    db: Session = Depends(get_db),
+):
+    """当前筛选条件下全部待译/失败任务 id，供跨页全选未译。"""
+    query = db.query(LiteraryTranslation.id)
+    query = _apply_translation_list_filters(
+        query,
+        status=None,
+        category=category if category and category != "all" else None,
+        group_name=group_name,
+        q=q,
+    )
+    query = query.filter(
+        LiteraryTranslation.status.in_([
+            LiteraryTranslationStatus.PENDING,
+            LiteraryTranslationStatus.FAILED,
+        ])
+    )
+    ids = [row[0] for row in query.order_by(LiteraryTranslation.created_at.desc()).all()]
+    return {"ids": ids, "total": len(ids)}
+
+
 @router.post("/translations/groups", response_model=TranslationGroupItem)
 async def create_translation_group(
     request: TranslationGroupCreate,
@@ -825,6 +869,11 @@ async def update_literary_translation(
         translation.style_agent_id = request.style_agent_id
     if request.user_requirements is not None:
         translation.user_requirements = request.user_requirements
+    if request.literary_type is not None:
+        literary_type = request.literary_type.strip() if isinstance(request.literary_type, str) else str(request.literary_type)
+        if not literary_type:
+            raise HTTPException(status_code=400, detail="翻译类型不能为空")
+        translation.literary_type = literary_type
 
     db.commit()
     db.refresh(translation)
@@ -1022,25 +1071,6 @@ def _apply_finalized_parts(paragraphs: list, finalized_parts: List[str]) -> None
         para.translated_text = cleaned
 
 
-def _split_paragraphs_into_batches(paragraphs: list, size_fn, max_chars: int = STEP4_BATCH_CHARS) -> list:
-    """按字符量把段落切成批次。"""
-    batches: list[list] = []
-    current_batch: list = []
-    current_size = 0
-    for para in paragraphs:
-        p_size = size_fn(para)
-        if current_size + p_size > max_chars and current_batch:
-            batches.append(current_batch)
-            current_batch = [para]
-            current_size = p_size
-        else:
-            current_batch.append(para)
-            current_size += p_size
-    if current_batch:
-        batches.append(current_batch)
-    return batches
-
-
 async def _finalize_paragraph_batch(
     translation,
     batch: list,
@@ -1068,49 +1098,10 @@ async def _finalize_paragraph_batch(
     finalized_text = result.get("final_translation", batch_revised)
     finalized_parts = _align_finalized_parts(finalized_text, fallback_texts)
     _apply_finalized_parts(batch, finalized_parts)
-    db.commit()
-
-
-async def _holistic_errata_batch(
-    translation,
-    batch: list,
-    db: Session,
-) -> None:
-    """对一批已定稿段落做整体勘误（常识/文化/习俗用语等）。"""
-    fallback_texts = [
-        (p.step4_finalization or p.step3_revision or p.translated_text or "") for p in batch
-    ]
-    batch_source = _pack_marked_paragraphs([p.source_text or "" for p in batch])
-    batch_draft = _pack_marked_paragraphs(fallback_texts)
-    guidance = build_prompt_guidance(translation, db, include_story=True) or None
-    result = await call_for_step(
-        4,
-        lambda c, src=batch_source, draft=batch_draft, guide=guidance, count=len(batch): c.literary_holistic_errata(
-            src,
-            draft,
-            translation.source_lang,
-            translation.target_lang,
-            translation.literary_type,
-            guidance=guide,
-            paragraph_count=count,
-        ),
-    )
-    corrected = result.get("corrected_translation", batch_draft)
-    corrected_parts = _align_finalized_parts(corrected, fallback_texts)
-    _apply_finalized_parts(batch, corrected_parts)
-    errata = result.get("errata") or []
-    summary = (result.get("summary") or "").strip()
-    if errata or summary:
-        print(
-            f"[HolisticErrata] translation={translation.id} paras="
-            f"{batch[0].paragraph_index}-{batch[-1].paragraph_index} "
-            f"fixes={len(errata)} summary={summary[:120]}"
-        )
-    db.commit()
 
 
 async def _execute_step4(translation_id: int, db: Session) -> None:
-    """执行第四步：定稿 + 整体勘误（常识/文化/习俗用语等）"""
+    """执行第四步：定稿 — 分批整合段落统一处理，支持大文件"""
     translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
     if not translation or translation.current_step < 4:
         raise HTTPException(status_code=400, detail="Please complete step 3 first")
@@ -1118,7 +1109,7 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
 
-    # 1) 定稿：只处理尚未完成的段落
+    # 只定稿尚未完成的段落，已有定稿的保留
     pending = [p for p in paragraphs if not _para_has_text(p.step4_finalization)]
     if pending:
         total_chars = sum(len(p.step3_revision or p.translated_text or "") for p in pending)
@@ -1126,36 +1117,25 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
             _ensure_workflow_active(translation_id)
             await _finalize_paragraph_batch(translation, pending, db)
         else:
-            for batch in _split_paragraphs_into_batches(
-                pending,
-                lambda p: len(p.step3_revision or p.translated_text or ""),
-            ):
+            batches: list[list] = []
+            current_batch: list = []
+            current_size = 0
+            for para in pending:
+                p_size = len(para.step3_revision or para.translated_text or "")
+                if current_size + p_size > STEP4_BATCH_CHARS and current_batch:
+                    batches.append(current_batch)
+                    current_batch = [para]
+                    current_size = p_size
+                else:
+                    current_batch.append(para)
+                    current_size += p_size
+            if current_batch:
+                batches.append(current_batch)
+
+            for batch in batches:
                 _ensure_workflow_active(translation_id)
                 await _finalize_paragraph_batch(translation, batch, db)
 
-    # 2) 整体勘误：以全文/分批视角订正常识、文化、习俗用语等
-    # 刷新段落，确保使用最新定稿文本
-    paragraphs = db.query(LiteraryParagraph).filter(
-        LiteraryParagraph.translation_id == translation_id
-    ).order_by(LiteraryParagraph.paragraph_index).all()
-    if paragraphs:
-        total_chars = sum(
-            len(p.step4_finalization or p.translated_text or "") for p in paragraphs
-        )
-        if total_chars <= STEP4_BATCH_CHARS:
-            _ensure_workflow_active(translation_id)
-            await _holistic_errata_batch(translation, paragraphs, db)
-        else:
-            for batch in _split_paragraphs_into_batches(
-                paragraphs,
-                lambda p: len(p.step4_finalization or p.translated_text or ""),
-            ):
-                _ensure_workflow_active(translation_id)
-                await _holistic_errata_batch(translation, batch, db)
-
-    paragraphs = db.query(LiteraryParagraph).filter(
-        LiteraryParagraph.translation_id == translation_id
-    ).order_by(LiteraryParagraph.paragraph_index).all()
     finalized_all = PARA_SEP.join(
         (p.step4_finalization or p.translated_text or "") for p in paragraphs
     )
@@ -1264,6 +1244,55 @@ async def _run_workflow_background(translation_id: int, generation: int):
 
 class WorkflowStartRequest(BaseModel):
     collab_mode: Optional[str] = None
+    reset: bool = False
+
+
+class BatchWorkflowStartRequest(BaseModel):
+    translation_ids: List[int]
+    collab_mode: Optional[str] = None
+
+
+@router.post("/translations/batch/workflow/start")
+async def start_batch_workflow(
+    request: BatchWorkflowStartRequest,
+    db: Session = Depends(get_db)
+):
+    """批量启动翻译流程，按顺序依次处理多个任务。
+    必须注册在 /translations/{translation_id}/workflow/start 之前，否则 batch 会被当成 id 导致 422。
+    """
+    translation_ids = request.translation_ids or []
+    if not translation_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一个任务")
+    resolved_mode = _resolve_task_collab_mode(request.collab_mode) if request.collab_mode else None
+
+    running_statuses = {
+        LiteraryTranslationStatus.TRANSLATING,
+        LiteraryTranslationStatus.VERIFYING,
+        LiteraryTranslationStatus.REVISING,
+        LiteraryTranslationStatus.FINALIZING,
+    }
+
+    valid_ids = []
+    for tid in translation_ids:
+        t = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == tid).first()
+        if not t:
+            continue
+        if t.status in running_statuses:
+            continue
+        if resolved_mode:
+            t.collab_mode = resolved_mode
+        elif not getattr(t, "collab_mode", None):
+            t.collab_mode = _default_system_collab_mode()
+        t.status = LiteraryTranslationStatus.PENDING
+        valid_ids.append(tid)
+
+    if not valid_ids:
+        raise HTTPException(status_code=400, detail="没有可启动的任务")
+
+    db.commit()
+    asyncio.create_task(_run_batch_workflow_background(valid_ids))
+
+    return {"message": f"已加入队列 {len(valid_ids)} 个任务", "translation_ids": valid_ids}
 
 
 @router.post("/translations/{translation_id}/workflow/start")
@@ -1289,7 +1318,15 @@ async def start_translation_workflow(
     paragraphs = db.query(LiteraryParagraph).filter(
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
-    resume_step = _detect_resume_step(paragraphs)
+    reset = bool(request.reset) if request else False
+    if reset:
+        _clear_paragraph_translations(paragraphs)
+        resume_step = 1
+        translation.beauty_sound_score = None
+        translation.beauty_word_score = None
+        translation.beauty_meaning_score = None
+    else:
+        resume_step = _detect_resume_step(paragraphs)
     status_by_step = {
         1: LiteraryTranslationStatus.TRANSLATING,
         2: LiteraryTranslationStatus.VERIFYING,
@@ -1348,9 +1385,9 @@ async def stop_translation_workflow(
     # bump 代数，令后台协程在下一段/下一步时自行退出
     _bump_workflow_generation(translation_id)
     translation.status = LiteraryTranslationStatus.FAILED
-    translation.error_message = "Cancelled by user"
+    translation.error_message = None
     db.commit()
-    return {"message": "已终止", "status": "failed"}
+    return {"message": "已暂停", "status": "failed"}
 
 async def _run_batch_workflow_background(translation_ids: list):
     """依次执行多个任务的翻译流程，前一个完成后才开始下一个"""
@@ -1393,48 +1430,6 @@ async def _run_batch_workflow_background(translation_ids: list):
             await _run_workflow_background(tid, generation)
         except Exception as e:
             print(f"[BatchWorkflow] Translation {tid} failed: {e}")
-
-
-@router.post("/translations/batch/workflow/start")
-async def start_batch_workflow(
-    request: dict,
-    db: Session = Depends(get_db)
-):
-    """批量启动翻译流程，按顺序依次处理多个任务"""
-    translation_ids = request.get("translation_ids", [])
-    if not translation_ids:
-        raise HTTPException(status_code=400, detail="请选择至少一个任务")
-    batch_mode = request.get("collab_mode")
-    resolved_mode = _resolve_task_collab_mode(batch_mode) if batch_mode else None
-
-    running_statuses = {
-        LiteraryTranslationStatus.TRANSLATING,
-        LiteraryTranslationStatus.VERIFYING,
-        LiteraryTranslationStatus.REVISING,
-        LiteraryTranslationStatus.FINALIZING,
-    }
-
-    valid_ids = []
-    for tid in translation_ids:
-        t = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == tid).first()
-        if not t:
-            continue
-        if t.status in running_statuses:
-            continue
-        if resolved_mode:
-            t.collab_mode = resolved_mode
-        elif not getattr(t, "collab_mode", None):
-            t.collab_mode = _default_system_collab_mode()
-        t.status = LiteraryTranslationStatus.PENDING
-        valid_ids.append(tid)
-
-    if not valid_ids:
-        raise HTTPException(status_code=400, detail="没有可启动的任务")
-
-    db.commit()
-    asyncio.create_task(_run_batch_workflow_background(valid_ids))
-
-    return {"message": f"已加入队列 {len(valid_ids)} 个任务", "translation_ids": valid_ids}
 
 
 @router.get("/translations/{translation_id}/story")
@@ -1534,7 +1529,7 @@ async def get_workflow_status(
         (1, "翻译", translation.step1_translation),
         (2, "校验", translation.step2_verification),
         (3, "修改", translation.step3_revision),
-        (4, "定稿勘误", translation.step4_finalization),
+        (4, "定稿", translation.step4_finalization),
     ]
 
     steps = []
@@ -1642,6 +1637,7 @@ async def update_paragraph(
 @router.post("/paragraphs/{paragraph_id}/retranslate", response_model=LiteraryParagraphResponse)
 async def retranslate_paragraph(
     paragraph_id: int,
+    request: RetranslateParagraphRequest = Body(default_factory=RetranslateParagraphRequest),
     db: Session = Depends(get_db),
 ):
     """对单个段落重新跑完整四步翻译（初译→校验→润色→定稿）"""
@@ -1670,6 +1666,10 @@ async def retranslate_paragraph(
     ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
     story_mode = is_story_type(translation.literary_type)
     guidance = build_prompt_guidance(translation, db, include_story=story_mode)
+    extra = (request.extra_requirements or "").strip() if request else ""
+    if extra:
+        extra_block = f"## 本次重译要求\n{extra}"
+        guidance = f"{guidance}\n\n{extra_block}".strip() if guidance else extra_block
     neighbor = neighbor_note(all_paras, index) if story_mode else ""
     mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
 
@@ -1707,16 +1707,6 @@ async def retranslate_paragraph(
             ),
         )
         step4 = step4_result.get("final_translation", step3)
-        errata_result = await call_for_step(
-            4,
-            lambda c: c.literary_holistic_errata(
-                source_text, step4, translation.source_lang, translation.target_lang,
-                translation.literary_type, guidance=guidance or None, paragraph_count=1,
-            ),
-        )
-        step4 = AIClient._strip_translation_wrappers(
-            errata_result.get("corrected_translation", step4) or step4
-        )
         result = {
             "step1_translation": step1,
             "step2_verification": step2,
@@ -3175,30 +3165,6 @@ async def upload_and_translate_batch(
             db.add(paragraph)
         db.commit()
 
-        if auto_run:
-            mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
-            try:
-                await _execute_step1(translation.id, db)
-                await _execute_step2(translation.id, db)
-                await _execute_step3(translation.id, db)
-                await _execute_step4(translation.id, db)
-                db.refresh(translation)
-            except HTTPException:
-                raise
-            except Exception as e:
-                results.append({
-                    "filename": file.filename,
-                    "translation_id": translation.id,
-                    "error": f"自动执行四步流程失败: {str(e)}",
-                    "total_chunks": len(chunks),
-                    "total_chars": len(text_content),
-                    "current_step": translation.current_step,
-                    "status": translation.status,
-                })
-                continue
-            finally:
-                reset_collab_mode(mode_token)
-
         results.append({
             "filename": file.filename,
             "translation_id": translation.id,
@@ -3209,8 +3175,18 @@ async def upload_and_translate_batch(
             "status": translation.status,
         })
 
+    created_ids = [r["translation_id"] for r in results if r.get("translation_id")]
+    if auto_run and created_ids:
+        # 后台按任务跑四步，避免 HTTP 请求卡住导致前端超时、看起来像上传坏了
+        asyncio.create_task(_run_batch_workflow_background(created_ids))
+
+    ok = len(created_ids)
+    msg = f"批量上传完成，共 {len(files)} 个文件，成功 {ok} 个"
+    if auto_run and created_ids:
+        msg += "，已加入翻译队列"
+
     return {
-        "message": f"批量上传完成，共 {len(files)} 个文件，成功 {sum(1 for r in results if r.get('translation_id'))} 个",
+        "message": msg,
         "results": results,
     }
 
@@ -3285,12 +3261,11 @@ async def translate_all_chunks(
                         translation.literary_type, guidance=guidance or None,
                     ),
                 )
-                step4 = step4_result.get("final_translation", step3)
                 result = {
                     "step1_translation": step1,
                     "step2_verification": step2,
                     "step3_revision": step3,
-                    "step4_finalization": step4,
+                    "step4_finalization": step4_result.get("final_translation", step3),
                 }
 
                 # 保存四步翻译结果
@@ -3317,21 +3292,6 @@ async def translate_all_chunks(
                 continue
 
         db.commit()
-
-        # 全文整体勘误（常识/文化/习俗用语）
-        paragraphs = db.query(LiteraryParagraph).filter(
-            LiteraryParagraph.translation_id == translation_id
-        ).order_by(LiteraryParagraph.paragraph_index).all()
-        if paragraphs:
-            for batch in _split_paragraphs_into_batches(
-                paragraphs,
-                lambda p: len(p.step4_finalization or p.translated_text or ""),
-            ):
-                await _holistic_errata_batch(translation, batch, db)
-
-        paragraphs = db.query(LiteraryParagraph).filter(
-            LiteraryParagraph.translation_id == translation_id
-        ).order_by(LiteraryParagraph.paragraph_index).all()
 
         # 更新任务状态
         full_step1 = "\n\n".join([p.step1_translation or "" for p in paragraphs if p.step1_translation])

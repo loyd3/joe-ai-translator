@@ -1172,9 +1172,6 @@ Output only the translated text, no additional comments."""
 ### 4. 完美准确
 - 零错误：无错译、漏译、增译
 - 细节到位：标点、格式、特殊内容处理得当
-
-### 5. 初步勘误意识
-- 留意常识硬伤、行业惯例误用、习语/固定搭配误译
 {marker_rule}
 
 ## 输出格式
@@ -1223,9 +1220,6 @@ Output only the translated text, no additional comments."""
 - 毫无翻译腔，读起来像目标语言的原创
 - 符合目标语言同类文体的表达习惯
 - 消除残留的生硬表达
-
-### 6. 初步勘误意识（为后续整体勘误打底）
-- 留意明显的常识硬伤、文化错位、习语误译，能改则改
 {marker_rule}
 
 ## 输出格式
@@ -1275,111 +1269,6 @@ Output only the translated text, no additional comments."""
                 "translator_note": ""
             }
 
-    async def literary_holistic_errata(
-        self,
-        source_text: str,
-        draft_translation: str,
-        source_lang: str,
-        target_lang: str,
-        literary_type: str = "general",
-        guidance: Optional[str] = None,
-        paragraph_count: Optional[int] = None,
-    ) -> dict:
-        """定稿后的整体勘误：以全文视角订正常识、文化、习俗用语等错误。"""
-        source_name = self.get_language_name(source_lang)
-        target_name = self.get_language_name(target_lang)
-        lit_type_name = self.get_literary_type_name(literary_type)
-        marker_rule = ""
-        if paragraph_count and paragraph_count >= 1:
-            marker_rule = f"""
-
-## 段落对齐（必须遵守）
-- 输入已用 <<<PARA_0>>> ... <<<PARA_{paragraph_count - 1}>>> 标记分段
-- corrected_translation 必须保留全部 {paragraph_count} 个标记，顺序与编号不得改动
-- 不得合并、拆分或增删段落；每个标记后只放该段订正后的译文"""
-
-        system_prompt = f"""你是资深{lit_type_name}审校与勘误专家。原文为{source_name}，译文为{target_name}。
-请以**整体视角**审读已定稿译文，对照原文做订正，重点抓「分段翻译容易漏掉」的问题。
-
-## 勘误重点（按优先级）
-
-### 1. 常识与事实
-- 明显违背常识、时代背景、地理/历史/科学事实的表述
-- 逻辑矛盾、前后情节/数据不一致
-- 数量、称谓辈分、时间线硬伤
-
-### 2. 文化与习俗
-- 文化意象、典故、礼仪、禁忌被误译或直译致误
-- 不符合目标语文化习惯的生硬对应
-- 原文文化色彩被无故抹平或过度改写
-
-### 3. 习俗用语与地道表达
-- 成语、谚语、俚语、口头禅译错或译僵
-- 敬语/谦语/称谓系统错乱
-- 残留翻译腔、字面硬译、搭配不当
-
-### 4. 全书一致性
-- 人名、地名、专名、术语前后不一
-- 语气、语体在相邻段落间无故跳变
-
-## 修改原则
-- 有错必改，无错不改；不要为了「更华丽」而重写
-- 订正后仍须忠实原文信息与风格
-- 不要输出思考过程；不要添加译者说明进正文
-- 严禁输出【待译原文】等提示标记
-{marker_rule}
-
-## 输出格式（JSON）
-{{
-  "corrected_translation": "订正后的全文译文（保留全部 <<<PARA_N>>> 标记）",
-  "errata": [
-    {{"category": "常识|文化|习俗用语|一致性|其他", "issue": "问题简述", "fix": "如何改正"}}
-  ],
-  "summary": "本次勘误一句话总结"
-}}
-
-若几乎无可改之处，errata 可为 []，corrected_translation 仍返回润色后的稳妥文本（可与输入相同）。"""
-
-        keep_hint = (
-            f"请完成整体勘误，并严格保留全部 {paragraph_count} 个 <<<PARA_N>>> 段落标记。"
-            if paragraph_count and paragraph_count >= 1
-            else "请完成整体勘误，保持段落结构不变。"
-        )
-        messages = [
-            {"role": "system", "content": self._apply_story_guidance(system_prompt, guidance)},
-            {
-                "role": "user",
-                "content": (
-                    f"【完整原文】({source_name}):\n{source_text}\n\n"
-                    f"【待勘误定稿译文】({target_name}):\n{draft_translation}\n\n"
-                    f"{keep_hint}"
-                ),
-            },
-        ]
-
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            **self._sampling_kwargs(temperature=0.25),
-        )
-
-        import json
-        try:
-            result = json.loads(response.choices[0].message.content or "{}")
-            cleaned = self._clean_translation_fields(result, "corrected_translation")
-            if not (cleaned.get("corrected_translation") or "").strip():
-                cleaned["corrected_translation"] = self._strip_translation_wrappers(draft_translation)
-            if not isinstance(cleaned.get("errata"), list):
-                cleaned["errata"] = []
-            return cleaned
-        except Exception:
-            return {
-                "corrected_translation": self._strip_translation_wrappers(draft_translation),
-                "errata": [],
-                "summary": "勘误解析失败，保留原定稿",
-            }
-
     async def literary_translate_paragraph(
         self,
         paragraph: str,
@@ -1421,14 +1310,6 @@ Output only the translated text, no additional comments."""
             guidance=guidance,
         )
         step4 = step4_result.get("final_translation", step3)
-
-        # 定稿后整体勘误（单段也做常识/文化/习俗用语订正）
-        errata_result = await self.literary_holistic_errata(
-            paragraph, step4, source_lang, target_lang, literary_type,
-            guidance=guidance,
-            paragraph_count=1,
-        )
-        step4 = errata_result.get("corrected_translation", step4) or step4
         
         return {
             "step1_translation": step1,
@@ -1442,7 +1323,6 @@ Output only the translated text, no additional comments."""
             },
             "final_assessment": step4_result.get("final_assessment", ""),
             "translator_note": step4_result.get("translator_note", ""),
-            "errata_summary": errata_result.get("summary", ""),
         }
 
     async def extract_professional_terms(

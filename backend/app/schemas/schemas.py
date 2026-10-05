@@ -380,6 +380,10 @@ class ParagraphUpdateRequest(BaseModel):
     user_edited_text: str = Field(..., min_length=0)
 
 
+class RetranslateParagraphRequest(BaseModel):
+    extra_requirements: Optional[str] = Field(default=None, max_length=2000, description="本次重译的额外要求")
+
+
 class LiteraryTranslationUpdate(BaseModel):
     """更新文学翻译任务请求"""
     title: Optional[str] = None
@@ -389,6 +393,7 @@ class LiteraryTranslationUpdate(BaseModel):
     status: Optional[str] = None  # 状态管理：pending, translating, verifying, revising, finalizing, completed, failed
     style_agent_id: Optional[int] = None
     user_requirements: Optional[str] = None
+    literary_type: Optional[str] = None
 
 
 # ========== 文风智能体 ==========

@@ -37,6 +37,12 @@ const shouldShowGlobalLoading = (config: any) => {
     params?.include_paragraphs
 }
 api.interceptors.request.use((config) => {
+  // 让浏览器自动带 boundary；实例默认的 application/json 会让 FastAPI 收不到 files
+  if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+    const headers: any = config.headers
+    if (headers?.delete) headers.delete('Content-Type')
+    else if (headers) delete headers['Content-Type']
+  }
   if (shouldShowGlobalLoading(config)) {
     if (globalLoadingRefCount === 0) {
       globalLoading = ElLoading.service({ fullscreen: true, text: '加载任务中...' })
@@ -224,6 +230,9 @@ export const literaryApi = {
     q?: string
   }) => api.get<{ items: any[]; total: number; skip: number; limit: number }>('/literary/translations', { params }),
 
+  listUntranslatedIds: (params?: { category?: string; group_name?: string; q?: string }) =>
+    api.get<{ ids: number[]; total: number }>('/literary/translations/untranslated-ids', { params }),
+
   // 获取翻译文档分组
   listTranslationGroups: (params?: { category?: string }) =>
     api.get<Array<{ id?: number | null; name: string; count: number; sort_order?: number }>>(
@@ -269,6 +278,7 @@ export const literaryApi = {
     status?: string
     style_agent_id?: number | null
     user_requirements?: string
+    literary_type?: string
   }) => api.put(`/literary/translations/${id}`, data),
   
   // 删除翻译任务
@@ -277,7 +287,7 @@ export const literaryApi = {
   // ===== 翻译流程 =====
 
   // 启动四步翻译流程（后台执行，立即返回）
-  startWorkflow: (id: number, data?: { collab_mode?: 'online' | 'local' | 'collab' | string }) =>
+  startWorkflow: (id: number, data?: { collab_mode?: 'online' | 'local' | 'collab' | string; reset?: boolean }) =>
     api.post(`/literary/translations/${id}/workflow/start`, data || {}),
 
   // 终止四步翻译流程
@@ -307,8 +317,8 @@ export const literaryApi = {
     api.put(`/literary/paragraphs/${paragraphId}`, data),
 
   // 单段 AI 重译（四步流程，耗时较长）
-  retranslateParagraph: (paragraphId: number) =>
-    api.post(`/literary/paragraphs/${paragraphId}/retranslate`, null, { timeout: 300000 }),
+  retranslateParagraph: (paragraphId: number, data?: { extra_requirements?: string }) =>
+    api.post(`/literary/paragraphs/${paragraphId}/retranslate`, data || {}, { timeout: 300000 }),
   
   // ===== 导出 =====
 
@@ -381,20 +391,16 @@ export const literaryApi = {
 
   // 解析上传文件为正文（不创建任务，用于新建任务时填充原文）
   parseFile: (formData: FormData) =>
-    api.post<{ text: string; filename: string }>('/literary/parse-file', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    }),
+    api.post<{ text: string; filename: string }>('/literary/parse-file', formData),
   // 上传文件创建翻译任务
   uploadAndTranslate: (formData: FormData) =>
-    api.post('/literary/translations/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    }),
+    api.post('/literary/translations/upload', formData),
   // 批量上传文件创建多个翻译任务
   uploadAndTranslateBatch: (formData: FormData) =>
     api.post<{ message: string; results: Array<{ filename: string; translation_id: number | null; error: string | null; total_chunks: number; total_chars: number; current_step: number; status: string }> }>(
       '/literary/translations/upload-batch',
       formData,
-      { headers: { 'Content-Type': 'multipart/form-data' } }
+      { timeout: 180000 }
     ),
 
   // 一键翻译所有段落

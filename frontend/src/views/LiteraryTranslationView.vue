@@ -12,6 +12,7 @@
         </div>
         <div class="header-btns">
           <el-button v-if="batchMode" text size="small" @click="exitBatchMode">取消</el-button>
+          <el-button v-if="batchMode" size="small" :loading="selectingUntranslated" @click="selectUntranslatedTasks()">全选未译</el-button>
           <el-button
             v-if="batchMode && selectedTaskIds.length > 0"
             type="primary"
@@ -19,22 +20,22 @@
             @click="startBatchWorkflow"
             :loading="batchStarting"
           >翻译 {{ selectedTaskIds.length }} 项</el-button>
-          <el-tooltip v-if="!batchMode" content="文档库" placement="top">
+          <!-- <el-tooltip v-if="!batchMode" content="文档库" placement="top">
             <el-button circle class="icon-btn" :type="panelMode === 'documents' ? 'primary' : 'default'" @click="goToDocuments">
               <el-icon><FolderOpened /></el-icon>
             </el-button>
-          </el-tooltip>
+          </el-tooltip> -->
           <el-tooltip v-if="!batchMode" content="批量翻译" placement="top">
             <el-button circle class="icon-btn" @click="enterBatchMode">
               <el-icon><List /></el-icon>
             </el-button>
           </el-tooltip>
-          <el-tooltip content="新建任务" placement="top">
+          <el-tooltip v-if="!batchMode" content="新建任务" placement="top">
             <el-button type="primary" circle class="icon-btn" @click="createNewTask">
               <el-icon><Plus /></el-icon>
             </el-button>
           </el-tooltip>
-          <el-tooltip content="批量上传文件" placement="top">
+          <el-tooltip v-if="!batchMode" content="批量上传文件" placement="top">
             <el-button circle class="icon-btn" @click="openBatchUpload">
               <el-icon><Upload /></el-icon>
             </el-button>
@@ -107,9 +108,15 @@
       </div>
 
       <div class="sidebar-pager" v-if="taskTotal > TASK_PAGE_SIZE">
+        <div class="pager-meta">
+          {{ taskPage }} / {{ taskPageCount }} 页 · 共 {{ taskTotal }} 篇
+          <span v-if="batchMode && selectedTaskIds.length"> · 已选 {{ selectedTaskIds.length }}</span>
+        </div>
         <el-pagination
           small
+          background
           layout="prev, pager, next"
+          :pager-count="5"
           :total="taskTotal"
           :page-size="TASK_PAGE_SIZE"
           :current-page="taskPage"
@@ -208,13 +215,16 @@
                 <el-option v-for="lang in targetLanguages" :key="lang.code" :label="lang.name" :value="lang.code" />
               </el-select>
 
-              <el-tag
+              <el-select
+                v-model="currentTask.literary_type"
                 size="small"
-                :type="isLiteraryType(currentTask.literary_type) ? '' : 'warning'"
-                effect="plain"
-                round
-                class="type-badge"
-              >{{ getTypeName(currentTask.literary_type) }}</el-tag>
+                class="type-sel"
+                @change="saveLiteraryType"
+              >
+                <el-option-group v-for="g in typeGroups" :key="g.label" :label="g.label">
+                  <el-option v-for="opt in g.options" :key="opt.value" :label="opt.label" :value="opt.value" />
+                </el-option-group>
+              </el-select>
               <el-tag
                 v-if="currentTask.collab_mode"
                 size="small"
@@ -232,16 +242,28 @@
                 </div>
               </div>
 
-              <el-tooltip v-if="canStartWorkflow" :content="currentTask.status === 'failed' ? '重新翻译' : '开始翻译'" placement="bottom">
-                <el-button type="primary" circle class="icon-btn" @click="startWorkflow" :loading="processing">
-                  <el-icon><VideoPlay /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-tooltip v-else-if="isWorkflowRunning" content="终止流程" placement="bottom">
-                <el-button type="danger" circle class="icon-btn" @click="stopWorkflow" :loading="processing">
-                  <el-icon><VideoPause /></el-icon>
-                </el-button>
-              </el-tooltip>
+              <div class="workflow-ops">
+                <el-tooltip v-if="!isWorkflowRunning" content="从尚未翻译的段落继续" placement="bottom">
+                  <el-button type="primary" circle class="icon-btn" :disabled="!canResumeWorkflow" :loading="processing" @click="openWorkflowStart('start')">
+                    <el-icon><VideoPlay /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip v-if="isWorkflowRunning" content="暂停：停止当前翻译，已译内容保留" placement="bottom">
+                  <el-button type="warning" circle class="icon-btn" :loading="processing" @click="stopWorkflow">
+                    <el-icon><VideoPause /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip v-if="!isWorkflowRunning" content="继续：从未译处接着跑" placement="bottom">
+                  <el-button circle class="icon-btn" :disabled="!canContinueWorkflow" :loading="processing" @click="openWorkflowStart('continue')">
+                    <el-icon><DArrowRight /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip v-if="!isWorkflowRunning" content="重译：清空已有译文并从头翻译" placement="bottom">
+                  <el-button circle class="icon-btn" :disabled="!canResetRetranslate" :loading="processing" @click="openWorkflowStart('retranslate')">
+                    <el-icon><RefreshRight /></el-icon>
+                  </el-button>
+                </el-tooltip>
+              </div>
               <el-tag v-if="isWorkflowRunning" type="warning" effect="plain" round>{{ getStatusText(currentTask.status) }}</el-tag>
               <el-tag v-else-if="currentTask.status === 'completed'" type="success" effect="plain" round>已完成</el-tag>
               <el-tag v-if="workflowLoading" type="info" effect="plain" round>加载中</el-tag>
@@ -271,7 +293,7 @@
                   </template>
                 </div>
               </el-popover>
-              <el-tooltip content="定稿勘误" placement="bottom">
+              <el-tooltip content="定稿" placement="bottom">
                 <el-button circle class="icon-btn" @click="goToResultPage">
                   <el-icon><Document /></el-icon>
                 </el-button>
@@ -387,17 +409,44 @@
                   <div class="version-label">
                     <span>第 {{ para.paragraph_index + 1 }} 段</span>
                     <div class="version-actions">
-                      <el-tooltip content="AI 重译" placement="top">
-                        <el-button
-                          circle
-                          class="icon-btn"
-                          :loading="retranslatingId === para.id"
-                          :disabled="!!retranslatingId && retranslatingId !== para.id"
-                          @click.stop="retranslateParagraph(para)"
-                        >
-                          <el-icon v-if="retranslatingId !== para.id"><RefreshRight /></el-icon>
-                        </el-button>
-                      </el-tooltip>
+                      <el-popover
+                        :visible="isRetranslateOpen(para)"
+                        placement="bottom-end"
+                        :width="320"
+                        trigger="click"
+                        :teleported="true"
+                        popper-class="retranslate-popper"
+                        :disabled="!!retranslatingId && retranslatingId !== para.id"
+                        @update:visible="(v) => onRetranslateVisible(para, v)"
+                      >
+                        <template #reference>
+                          <el-button
+                            circle
+                            class="icon-btn"
+                            :loading="retranslatingId === para.id"
+                            :disabled="!!retranslatingId && retranslatingId !== para.id"
+                            @click.stop
+                          >
+                            <el-icon v-if="retranslatingId !== para.id"><RefreshRight /></el-icon>
+                          </el-button>
+                        </template>
+                        <div class="retranslate-panel">
+                          <div class="retranslate-title">AI 重译 · 第 {{ para.paragraph_index + 1 }} 段</div>
+                          <p class="retranslate-hint">覆盖该段现有译文。可填写本次要求（选填）。</p>
+                          <el-input
+                            v-model="retranslateRequirements"
+                            type="textarea"
+                            :rows="3"
+                            maxlength="500"
+                            show-word-limit
+                            placeholder="如更口语、保留术语原文、缩短句子等"
+                          />
+                          <div class="retranslate-actions">
+                            <el-button size="small" @click="closeRetranslatePanel">取消</el-button>
+                            <el-button type="primary" size="small" :loading="retranslatingId === para.id" @click="confirmRetranslateParagraph">开始重译</el-button>
+                          </div>
+                        </div>
+                      </el-popover>
                       <el-tooltip :content="miniEditId === para.id ? '完成' : '编辑'" placement="top">
                         <el-button
                           v-if="rightMode === 'read'"
@@ -505,19 +554,8 @@
         </el-row>
         <el-form-item label="翻译类型">
           <el-select v-model="newTaskForm.literary_type" style="width: 100%;">
-            <el-option-group label="文学">
-              <el-option label="一般" value="general" />
-              <el-option label="诗歌" value="poetry" />
-              <el-option label="散文" value="prose" />
-              <el-option label="小说" value="novel" />
-              <el-option label="戏剧" value="drama" />
-            </el-option-group>
-            <el-option-group label="专业">
-              <el-option label="科技" value="tech" />
-              <el-option label="商业" value="business" />
-              <el-option label="贸易" value="trade" />
-              <el-option label="法律" value="legal" />
-              <el-option label="医学" value="medical" />
+            <el-option-group v-for="g in typeGroups" :key="g.label" :label="g.label">
+              <el-option v-for="opt in g.options" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-option-group>
           </el-select>
         </el-form-item>
@@ -609,19 +647,8 @@
         </el-row>
         <el-form-item label="翻译类型">
           <el-select v-model="batchUploadForm.literary_type" style="width: 100%;">
-            <el-option-group label="文学">
-              <el-option label="一般" value="general" />
-              <el-option label="诗歌" value="poetry" />
-              <el-option label="散文" value="prose" />
-              <el-option label="小说" value="novel" />
-              <el-option label="戏剧" value="drama" />
-            </el-option-group>
-            <el-option-group label="专业">
-              <el-option label="科技" value="tech" />
-              <el-option label="商业" value="business" />
-              <el-option label="贸易" value="trade" />
-              <el-option label="法律" value="legal" />
-              <el-option label="医学" value="medical" />
+            <el-option-group v-for="g in typeGroups" :key="g.label" :label="g.label">
+              <el-option v-for="opt in g.options" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-option-group>
           </el-select>
         </el-form-item>
@@ -677,8 +704,8 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showStartModeDialog" title="选择模型模式" width="420px" destroy-on-close>
-      <p class="form-hint" style="margin-top: 0;">本次翻译使用哪套模型？</p>
+    <el-dialog v-model="showStartModeDialog" :title="workflowDialogTitle" width="420px" destroy-on-close>
+      <p class="form-hint" style="margin-top: 0;">{{ workflowDialogHint }}</p>
       <el-radio-group v-model="startModeForm.collab_mode" class="start-mode-group">
         <el-radio label="online" border>全部线上<span class="mode-desc">{{ aiConfigSummary?.online || '线上模型' }}</span></el-radio>
         <el-radio label="local" border>全部本地<span class="mode-desc">{{ aiConfigSummary?.local || '本地模型' }}</span></el-radio>
@@ -687,7 +714,7 @@
       <template #footer>
         <el-button @click="showStartModeDialog = false">取消</el-button>
         <el-button type="primary" :loading="processing || batchStarting" @click="confirmStartWithMode">
-          {{ startModeForm.batch ? `开始 ${selectedTaskIds.length} 个任务` : '开始翻译' }}
+          {{ workflowDialogConfirm }}
         </el-button>
       </template>
     </el-dialog>
@@ -708,6 +735,13 @@
             placeholder="选择或输入分组名"
           >
             <el-option v-for="g in namedGroups" :key="g.name" :label="g.name" :value="g.name" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="翻译类型">
+          <el-select v-model="editForm.literary_type" style="width: 100%;">
+            <el-option-group v-for="g in typeGroups" :key="g.label" :label="g.label">
+              <el-option v-for="opt in g.options" :key="opt.value" :label="opt.label" :value="opt.value" />
+            </el-option-group>
           </el-select>
         </el-form-item>
         <el-form-item label="状态">
@@ -733,7 +767,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, inject, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Upload, Document, Plus, List, Setting, Collection, Memo, Brush, VideoPlay, VideoPause, Trophy, Grid, DocumentCopy, View, Select, Sunny, RefreshRight, FolderOpened } from '@element-plus/icons-vue'
+import { Edit, Delete, Upload, Document, Plus, List, Setting, Collection, Memo, Brush, VideoPlay, VideoPause, DArrowRight, Trophy, Grid, DocumentCopy, View, Select, Sunny, RefreshRight, FolderOpened } from '@element-plus/icons-vue'
 import { literaryApi, translateApi, systemApi } from '@/api'
 import TermLibraryView from '@/views/TermLibraryView.vue'
 import DocumentLibraryView from '@/views/DocumentLibraryView.vue'
@@ -782,13 +816,14 @@ const showExport = ref(false)
 const showCreateDialog = ref(false)
 const showEditTask = ref(false)
 const editingTask = ref<any>(null)
-const editForm = ref({ title: '', group_name: '', status: '' })
+const editForm = ref({ title: '', group_name: '', status: '', literary_type: 'general' })
 const exportFormat = ref('txt')
 const exportWithSource = ref(false)
 
 const batchMode = ref(false)
 const selectedTaskIds = ref<number[]>([])
 const batchStarting = ref(false)
+const selectingUntranslated = ref(false)
 
 const LITERARY_TYPES = new Set(['poetry', 'prose', 'novel', 'drama', 'general'])
 const STORY_TYPES = new Set(['novel', 'drama', 'prose', 'general'])
@@ -812,7 +847,11 @@ const showStartModeDialog = ref(false)
 const startModeForm = ref({
   collab_mode: 'online' as 'online' | 'local' | 'collab',
   batch: false,
+  action: 'start' as 'start' | 'continue' | 'retranslate',
 })
+const showRetranslateDialog = ref(false)
+const retranslateRequirements = ref('')
+const retranslateTarget = ref<any>(null)
 
 const aiConfigSummary = computed(() => {
   const info = aiConfigInfo.value
@@ -889,9 +928,16 @@ async function submitBatchUpload() {
     batchFileList.value = []
     await loadTasks(true)
     const firstId = data.results?.find((r: any) => r.translation_id)?.translation_id
-    if (firstId) await selectTask(taskList.value.find((t: any) => t.id === firstId))
+    const firstTask = firstId ? taskList.value.find((t: any) => t.id === firstId) : null
+    if (firstTask) await selectTask(firstTask)
+    else if (firstId) await selectTask({ id: firstId })
+    if (batchUploadForm.value.auto_run && ok > 0) startBatchPolling(true)
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '批量上传失败')
+    const detail = e?.response?.data?.detail
+    const msg = Array.isArray(detail)
+      ? (detail[0]?.msg || '批量上传失败')
+      : (detail || e?.message || '批量上传失败')
+    ElMessage.error(msg)
   } finally {
     batchUploading.value = false
   }
@@ -905,6 +951,22 @@ const TYPE_LABELS: Record<string, string> = {
   poetry: '诗歌', prose: '散文', novel: '小说', drama: '戏剧', general: '一般',
   tech: '科技', business: '商业', trade: '贸易', legal: '法律', medical: '医学',
 }
+const typeGroups = [
+  { label: '文学', options: [
+    { label: '一般', value: 'general' },
+    { label: '诗歌', value: 'poetry' },
+    { label: '散文', value: 'prose' },
+    { label: '小说', value: 'novel' },
+    { label: '戏剧', value: 'drama' },
+  ]},
+  { label: '专业', options: [
+    { label: '科技', value: 'tech' },
+    { label: '商业', value: 'business' },
+    { label: '贸易', value: 'trade' },
+    { label: '法律', value: 'legal' },
+    { label: '医学', value: 'medical' },
+  ]},
+]
 const getTypeName = (type: string) => TYPE_LABELS[type] || type
 const isLiteraryType = (type: string) => LITERARY_TYPES.has(type || 'general')
 const isStoryType = (type: string) => STORY_TYPES.has(type || '')
@@ -946,20 +1008,49 @@ const currentStep = computed(() => {
   return Math.max(0, (task.current_step || 1) - 1)
 })
 
-const canStartWorkflow = computed(() => {
-  const s = currentTask.value?.status
-  return s === 'pending' || s === 'failed'
-})
-
 const isWorkflowRunning = computed(() =>
   ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
 )
+
+const canResumeWorkflow = computed(() => {
+  const s = currentTask.value?.status
+  return !!currentTask.value && s !== 'completed' && !isWorkflowRunning.value
+})
+
+const canContinueWorkflow = computed(() => {
+  const s = currentTask.value?.status
+  return s === 'failed' && !isWorkflowRunning.value
+})
+
+const canResetRetranslate = computed(() => !!currentTask.value && !isWorkflowRunning.value)
+
+const workflowDialogTitle = computed(() => {
+  if (startModeForm.value.batch) return '批量翻译'
+  if (startModeForm.value.action === 'retranslate') return '重新翻译'
+  if (startModeForm.value.action === 'continue') return '继续翻译'
+  return '开始翻译'
+})
+
+const workflowDialogHint = computed(() => {
+  if (startModeForm.value.batch) return '所选未完成任务将从未译段落继续，不会清空已有译文。'
+  if (startModeForm.value.action === 'retranslate') return '将清空全部段落译文并从第一步重新翻译。请选择本次使用的模型模式。'
+  return '将从未翻译完成的段落继续，已有译文会保留。请选择本次使用的模型模式。'
+})
+
+const workflowDialogConfirm = computed(() => {
+  if (startModeForm.value.batch) return `开始 ${selectedTaskIds.value.length} 个任务`
+  if (startModeForm.value.action === 'retranslate') return '清空并重译'
+  if (startModeForm.value.action === 'continue') return '继续翻译'
+  return '开始翻译'
+})
+
+const taskPageCount = computed(() => Math.max(1, Math.ceil(taskTotal.value / TASK_PAGE_SIZE)))
 
 const paraProgress = ref<{ total: number; done: number }>({ total: 0, done: 0 })
 const workflowLoading = ref(false)
 
 const stepItems = computed(() => {
-  const labels = ['翻译', '校验', '润色', '定稿勘误']
+  const labels = ['翻译', '校验', '润色', '定稿']
   const statusMap: Record<string, number> = { translating: 0, verifying: 1, revising: 2, finalizing: 3 }
   const active = currentStep.value
   const runningIdx = statusMap[currentTask.value?.status] ?? -1
@@ -1421,6 +1512,7 @@ const openEditTaskDialog = (task: any) => {
     title: task.title || '',
     group_name: task.group_name || '',
     status: task.status || 'pending',
+    literary_type: task.literary_type || 'general',
   }
   showEditTask.value = true
 }
@@ -1433,6 +1525,7 @@ const submitEditTask = async () => {
       title: editForm.value.title || undefined,
       group_name: editForm.value.group_name?.trim() || null,
       status: editForm.value.status || undefined,
+      literary_type: editForm.value.literary_type || undefined,
     })
     ElMessage.success('已保存')
     showEditTask.value = false
@@ -1469,12 +1562,9 @@ const confirmDeleteTask = async (task: any) => {
 
 const isTaskRunning = (status: string) => ['translating', 'verifying', 'revising', 'finalizing'].includes(status)
 
-const enterBatchMode = () => {
+const enterBatchMode = async () => {
   batchMode.value = true
-  selectedTaskIds.value = filteredTaskList.value
-    .filter((t: any) => !isTaskRunning(t.status))
-    .filter((t: any) => t.status === 'pending' || t.status === 'failed')
-    .map((t: any) => t.id)
+  await selectUntranslatedTasks({ silent: true })
 }
 
 const exitBatchMode = () => {
@@ -1490,16 +1580,40 @@ const toggleTaskSelection = (id: number) => {
   else selectedTaskIds.value.push(id)
 }
 
+const selectUntranslatedTasks = async (opts?: { silent?: boolean }) => {
+  selectingUntranslated.value = true
+  try {
+    const params: Record<string, string> = {}
+    if (categoryGroup.value && categoryGroup.value !== 'all') {
+      params.category = categoryGroup.value
+    }
+    if (selectedGroup.value) {
+      params.group_name = selectedGroup.value
+    }
+    const res = await literaryApi.listUntranslatedIds(params)
+    selectedTaskIds.value = res.data.ids || []
+    if (!selectedTaskIds.value.length) {
+      if (!opts?.silent) ElMessage.info('当前筛选下没有未翻译或失败的任务')
+    } else if (!opts?.silent) {
+      ElMessage.success(`已跨页选中 ${selectedTaskIds.value.length} 个未译任务`)
+    }
+  } catch {
+    ElMessage.error('全选未译失败')
+  } finally {
+    selectingUntranslated.value = false
+  }
+}
+
 const startBatchWorkflow = async () => {
   if (selectedTaskIds.value.length === 0) return
-  startModeForm.value = { collab_mode: defaultCollabMode(), batch: true }
+  startModeForm.value = { collab_mode: defaultCollabMode(), batch: true, action: 'start' }
   showStartModeDialog.value = true
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let lastPolledStep = 0
 
-const startWorkflow = async () => {
+const openWorkflowStart = async (action: 'start' | 'continue' | 'retranslate') => {
   if (!currentTask.value) return
   const taskMode = currentTask.value.collab_mode
   startModeForm.value = {
@@ -1508,6 +1622,7 @@ const startWorkflow = async () => {
         ? taskMode
         : defaultCollabMode(),
     batch: false,
+    action,
   }
   showStartModeDialog.value = true
 }
@@ -1533,17 +1648,18 @@ const confirmStartWithMode = async () => {
   if (!currentTask.value) return
   processing.value = true
   try {
-    const startRes = await literaryApi.startWorkflow(currentTask.value.id, { collab_mode: mode })
+    const reset = startModeForm.value.action === 'retranslate'
+    const startRes = await literaryApi.startWorkflow(currentTask.value.id, { collab_mode: mode, reset })
     currentTask.value.status = startRes.data?.status || 'translating'
     currentTask.value.current_step = startRes.data?.resume_step || currentTask.value.current_step || 1
     currentTask.value.collab_mode = mode
     currentTask.value.error_message = null
     showStartModeDialog.value = false
     miniEditId.value = null
-    // 保留已有译文，从服务端同步；未译段落会继续翻译
     await loadParagraphPage(paragraphPage.value, true, { resetLocal: true })
     if (compareMode.value === 'full') await loadFullText()
     startPolling()
+    ElMessage.success(reset ? '已清空译文并开始重译' : '已从未译处开始翻译')
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || '启动翻译失败')
   } finally {
@@ -1559,7 +1675,7 @@ const stopWorkflow = async () => {
     paraProgress.value = { total: 0, done: 0 }
     await refreshTask()
     await loadTasks()
-    ElMessage.success('已终止')
+    ElMessage.success('已暂停，已译内容已保留')
   } catch (error: any) {
     const msg = error?.response?.data?.detail || '中止失败'
     ElMessage.error(msg)
@@ -1671,27 +1787,60 @@ const applyRetranslatedParagraph = (para: any, data: any) => {
   para.dirty = false
 }
 
-const retranslateParagraph = async (para: any) => {
-  if (!para?.id || retranslatingId.value) return
-  try {
-    await ElMessageBox.confirm(
-      `将对第 ${para.paragraph_index + 1} 段重新执行 AI 四步翻译，并覆盖该段现有译文。是否继续？`,
-      'AI 重译',
-      { type: 'warning', confirmButtonText: '重译', cancelButtonText: '取消' }
-    )
-  } catch {
+const isRetranslateOpen = (para: any) =>
+  showRetranslateDialog.value && retranslateTarget.value?.id === para.id
+
+const onRetranslateVisible = (para: any, visible: boolean) => {
+  if (retranslatingId.value && retranslatingId.value === para.id) {
+    showRetranslateDialog.value = true
+    retranslateTarget.value = para
     return
   }
+  if (visible) {
+    if (retranslateTarget.value?.id !== para.id) {
+      retranslateRequirements.value = ''
+    }
+    retranslateTarget.value = para
+    showRetranslateDialog.value = true
+    return
+  }
+  if (retranslateTarget.value?.id === para.id) {
+    showRetranslateDialog.value = false
+  }
+}
+
+const closeRetranslatePanel = () => {
+  if (retranslatingId.value) return
+  showRetranslateDialog.value = false
+}
+
+const confirmRetranslateParagraph = async () => {
+  const para = retranslateTarget.value
+  if (!para?.id || retranslatingId.value) return
   retranslatingId.value = para.id
   try {
-    const res = await literaryApi.retranslateParagraph(para.id)
+    const extra = retranslateRequirements.value.trim()
+    const res = await literaryApi.retranslateParagraph(para.id, extra ? { extra_requirements: extra } : undefined)
     applyRetranslatedParagraph(para, res.data)
     if (compareMode.value === 'full') await loadFullText()
+    showRetranslateDialog.value = false
     ElMessage.success(`第 ${para.paragraph_index + 1} 段重译完成`)
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || '重译失败')
   } finally {
     retranslatingId.value = null
+  }
+}
+
+const saveLiteraryType = async (value: string) => {
+  if (!currentTask.value?.id || !value) return
+  try {
+    await literaryApi.updateTranslation(currentTask.value.id, { literary_type: value })
+    currentTask.value.literary_type = value
+    ElMessage.success('翻译类型已更新')
+    await loadTasks()
+  } catch {
+    ElMessage.error('更新翻译类型失败')
   }
 }
 
@@ -1716,7 +1865,7 @@ const exportTranslation = async () => {
 }
 
 const getStatusType = (status: string) => ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
-const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿勘误中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 </script>
 
 <style scoped lang="scss">
@@ -1845,15 +1994,44 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 
 .sidebar-pager {
   flex-shrink: 0;
-  padding: 8px 10px;
+  padding: 10px 12px 12px;
   border-top: 1px solid var(--ins-line);
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(180deg, transparent, rgba(var(--ins-primary-rgb), 0.04));
+
+  .pager-meta {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--ins-muted);
+  }
 
   :deep(.el-pagination) {
-    --el-pagination-button-width: 24px;
-    --el-pagination-button-height: 24px;
+    --el-pagination-button-width: 28px;
+    --el-pagination-button-height: 28px;
+    --el-pagination-button-bg-color: var(--ins-surface);
+    --el-pagination-hover-color: var(--el-color-primary);
     font-size: 12px;
+    justify-content: center;
+  }
+
+  :deep(.el-pager li) {
+    min-width: 28px;
+    border-radius: 8px;
+    font-weight: 600;
+  }
+
+  :deep(.el-pager li.is-active) {
+    background: var(--el-color-primary);
+    color: #fff;
+  }
+
+  :deep(.btn-prev),
+  :deep(.btn-next) {
+    border-radius: 8px;
   }
 }
 
@@ -2081,7 +2259,14 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   }
 
   .lang-sel { width: 124px; }
+  .type-sel { width: 108px; }
   .arrow { color: var(--ins-muted); font-size: 16px; }
+
+  .workflow-ops {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
 }
 
 .icon-switch {
@@ -2340,5 +2525,37 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
 .config-source {
   margin-top: 8px;
   text-align: right;
+}
+</style>
+
+<style lang="scss">
+.retranslate-popper {
+  padding: 12px !important;
+  border-radius: 12px !important;
+  border: 1px solid var(--ins-line) !important;
+  box-shadow: 0 10px 28px rgba(16, 18, 24, 0.12) !important;
+}
+
+.retranslate-panel {
+  .retranslate-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ins-ink);
+    margin-bottom: 6px;
+  }
+
+  .retranslate-hint {
+    margin: 0 0 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--ins-muted);
+  }
+
+  .retranslate-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 10px;
+  }
 }
 </style>

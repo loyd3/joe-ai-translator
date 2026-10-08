@@ -155,7 +155,7 @@
       <!-- 译文输出区 -->
       <div class="output-panel">
         <div class="panel-header">
-          <span class="lang-label">{{ getLangName(currentTask?.target_lang || 'en') }}</span>
+          <span class="lang-label">{{ getLangName(currentTask?.target_lang || 'zh') }}</span>
           <div class="header-actions">
             <el-tooltip content="复制译文">
               <el-button link @click="copyOutput">
@@ -548,7 +548,7 @@ const copyOutput = () => {
 
 const speakOutput = () => {
   const utterance = new SpeechSynthesisUtterance(outputText.value)
-  utterance.lang = currentTask.value?.target_lang || 'en'
+  utterance.lang = currentTask.value?.target_lang || 'zh'
   speechSynthesis.speak(utterance)
 }
 
@@ -564,7 +564,7 @@ const startTranslation = async () => {
       title: '',
       source_text: inputText.value,
       source_lang: currentTask.value?.source_lang || 'auto',
-      target_lang: currentTask.value?.target_lang || 'en',
+      target_lang: currentTask.value?.target_lang || 'zh',
       literary_type: selectedLiteraryType.value as any,
       user_requirements: userRequirements.value.trim() || undefined,
       style_agent_id: selectedStyleAgentId.value,
@@ -595,9 +595,8 @@ const onFileSelect = async (opts: { file: File }) => {
     const form = new FormData()
     form.append('file', file)
     form.append('source_lang', currentTask.value?.source_lang || 'auto')
-    form.append('target_lang', currentTask.value?.target_lang || 'en')
+    form.append('target_lang', currentTask.value?.target_lang || 'zh')
     form.append('literary_type', selectedLiteraryType.value)
-    form.append('auto_run', 'true')
     form.append('collab_mode', selectedCollabMode.value)
     if (userRequirements.value.trim()) form.append('user_requirements', userRequirements.value.trim())
     if (selectedStyleAgentId.value != null) form.append('style_agent_id', String(selectedStyleAgentId.value))
@@ -612,7 +611,7 @@ const onFileSelect = async (opts: { file: File }) => {
       currentTask.value.step2_verification ||
       currentTask.value.step1_translation ||
       ''
-    ElMessage.success('文件已上传并完成四步翻译，可在线编辑或导出')
+    ElMessage.success('文件已上传，翻译任务已创建')
   } catch (e) {
     ElMessage.error('上传或翻译失败')
   } finally {

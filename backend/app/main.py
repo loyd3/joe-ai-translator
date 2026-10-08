@@ -167,6 +167,7 @@ def _ensure_ai_config_columns():
         "draft_model": ("VARCHAR(200) NULL", "VARCHAR(200)"),
         "draft_base_url": ("VARCHAR(500) NULL", "VARCHAR(500)"),
         "draft_fallback": ("TINYINT(1) NULL", "INTEGER"),
+        "draft_think": ("TINYINT(1) NULL", "INTEGER"),
     }
     try:
         inspector = inspect(engine)

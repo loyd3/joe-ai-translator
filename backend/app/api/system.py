@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 import openai
 
-from app.core.ai_client import get_settings, get_ai_client
+from app.core.ai_client import get_settings, get_ai_client, reset_ai_clients
 from app.database import get_db
 from app.models.models import AIConfig
 
@@ -177,6 +177,7 @@ def _serialize_config(db_cfg: AIConfig, settings) -> Dict[str, Any]:
         "draft_model": db_cfg.draft_model or "llama3.2",
         "draft_base_url": db_cfg.draft_base_url or "http://localhost:11434/v1",
         "draft_fallback": True if db_cfg.draft_fallback is None else bool(db_cfg.draft_fallback),
+        "draft_think": False if getattr(db_cfg, "draft_think", None) is None else bool(db_cfg.draft_think),
         "source": "database",
         "available_providers": PROVIDER_CATALOG,
     }
@@ -229,6 +230,7 @@ class AIConfigUpdate(BaseModel):
     draft_model: Optional[str] = None
     draft_base_url: Optional[str] = None
     draft_fallback: Optional[bool] = None
+    draft_think: Optional[bool] = None
 
 
 class AIConfigTestRequest(BaseModel):
@@ -293,6 +295,7 @@ async def get_ai_config(db: Session = Depends(get_db)):
         "draft_model": settings.ollama_model or "llama3.2",
         "draft_base_url": settings.ollama_base_url or "http://localhost:11434/v1",
         "draft_fallback": True,
+        "draft_think": False,
         "source": "env",
         "available_providers": PROVIDER_CATALOG,
     }
@@ -382,6 +385,11 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
     elif db_cfg.draft_fallback is None:
         db_cfg.draft_fallback = True
 
+    if request.draft_think is not None:
+        db_cfg.draft_think = bool(request.draft_think)
+    elif getattr(db_cfg, "draft_think", None) is None:
+        db_cfg.draft_think = False
+
     # 始终校验本地配置（配置页同时保存本地+线上，模式在开始翻译时再选）
     draft_meta = catalog.get(db_cfg.draft_provider or "ollama", {})
     if draft_meta.get("requires_api_key") and not (db_cfg.draft_api_key or "").strip():
@@ -393,6 +401,7 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
     db.refresh(db_cfg)
 
     try:
+        reset_ai_clients()
         client = get_ai_client()
         client.reload_from_db()
     except Exception:

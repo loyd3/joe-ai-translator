@@ -154,6 +154,7 @@ export const systemApi = {
     draft_model?: string
     draft_base_url?: string
     draft_fallback?: boolean
+    draft_think?: boolean
   }) => api.put('/system/ai-config', data),
   testAIConfig: (data: {
     provider: string

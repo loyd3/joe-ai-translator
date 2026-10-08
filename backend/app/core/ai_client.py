@@ -214,6 +214,7 @@ class AIClient:
     def _init_client(self):
         """初始化客户端：优先使用数据库配置，否则使用 .env 配置"""
         db_cfg = self._load_db_config()
+        self.local_think = False
         self._db_temperature = None
         self._db_max_tokens = None
         self._db_top_p = None
@@ -248,6 +249,7 @@ class AIClient:
             if provider == "ollama":
                 timeout = max(int(timeout), 180)
                 self._ollama_num_ctx = getattr(self.settings, "ollama_num_ctx", None) or 8192
+                self.local_think = bool(db_cfg.get("think"))
             self.provider = provider
             self._client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
             scale = self._estimate_model_scale(self.model) if provider == "ollama" else "-"
@@ -368,7 +370,11 @@ class AIClient:
             kwargs["presence_penalty"] = self._db_presence_penalty
         # OpenAI 兼容的 Ollama 端点通过 extra_body.options 传 num_ctx
         if getattr(self, "provider", "") == "ollama":
-            kwargs["extra_body"] = {"options": self._ollama_options()}
+            # think 为顶层字段：false 时 Qwen3 / qwen3.8 不再先输出思考
+            kwargs["extra_body"] = {
+                "options": self._ollama_options(),
+                "think": bool(getattr(self, "local_think", False)),
+            }
         return kwargs
 
     @property
@@ -1492,6 +1498,7 @@ def build_draft_override() -> dict:
         "presence_penalty": None,
         "timeout_seconds": int(getattr(settings, "ollama_timeout_seconds", None) or 300),
     }
+    think = False
     cfg = _read_ai_config_row()
     if cfg:
         if (cfg.draft_provider or "").strip():
@@ -1512,6 +1519,8 @@ def build_draft_override() -> dict:
             sampling["top_p"] = cfg.top_p
             sampling["frequency_penalty"] = cfg.frequency_penalty
             sampling["presence_penalty"] = cfg.presence_penalty
+        if getattr(cfg, "draft_think", None) is not None:
+            think = bool(cfg.draft_think)
     if provider == "ollama" and not str(api_key or "").strip():
         api_key = "ollama"
     if not (base_url or "").strip():
@@ -1523,6 +1532,7 @@ def build_draft_override() -> dict:
         "api_key": api_key,
         "model": model,
         "base_url": base_url,
+        "think": think,
         **sampling,
     }
 

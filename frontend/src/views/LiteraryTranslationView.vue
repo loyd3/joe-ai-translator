@@ -673,9 +673,6 @@
           </el-radio-group>
           <p class="form-hint">混合：本地预译 + 线上润色。对本次上传的全部任务生效。</p>
         </el-form-item>
-        <el-form-item label="上传后自动执行四步流程">
-          <el-switch v-model="batchUploadForm.auto_run" />
-        </el-form-item>
         <el-form-item label="选择文件">
           <el-upload
             ref="batchUploadRef"
@@ -835,11 +832,10 @@ const batchUploadRef = ref<any>(null)
 const batchFileList = ref<any[]>([])
 const batchUploadForm = ref({
   source_lang: 'auto',
-  target_lang: 'en',
+  target_lang: 'zh',
   literary_type: 'general' as string,
   user_requirements: '',
   style_agent_id: undefined as number | undefined,
-  auto_run: true,
   collab_mode: 'online' as 'online' | 'local' | 'collab',
 })
 const aiConfigInfo = ref<any>({ provider: '', source: '', has_api_key: false, api_key_masked: '' })
@@ -879,11 +875,10 @@ async function loadAIConfig() {
 function openBatchUpload() {
   batchUploadForm.value = {
     source_lang: 'auto',
-    target_lang: 'en',
+    target_lang: 'zh',
     literary_type: categoryGroup.value === 'professional' ? 'tech' : 'general',
     user_requirements: '',
     style_agent_id: undefined,
-    auto_run: true,
     collab_mode: defaultCollabMode(),
   }
   batchFileList.value = []
@@ -911,7 +906,6 @@ async function submitBatchUpload() {
     form.append('source_lang', batchUploadForm.value.source_lang)
     form.append('target_lang', batchUploadForm.value.target_lang)
     form.append('literary_type', batchUploadForm.value.literary_type)
-    form.append('auto_run', String(batchUploadForm.value.auto_run))
     form.append('collab_mode', batchUploadForm.value.collab_mode)
     if (batchUploadForm.value.user_requirements?.trim()) {
       form.append('user_requirements', batchUploadForm.value.user_requirements.trim())
@@ -931,7 +925,6 @@ async function submitBatchUpload() {
     const firstTask = firstId ? taskList.value.find((t: any) => t.id === firstId) : null
     if (firstTask) await selectTask(firstTask)
     else if (firstId) await selectTask({ id: firstId })
-    if (batchUploadForm.value.auto_run && ok > 0) startBatchPolling(true)
   } catch (e: any) {
     const detail = e?.response?.data?.detail
     const msg = Array.isArray(detail)

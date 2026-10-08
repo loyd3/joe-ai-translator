@@ -280,6 +280,7 @@ class AIConfig(Base):
     draft_model = Column(String(200), nullable=True, comment="本地草稿模型名")
     draft_base_url = Column(String(500), nullable=True, comment="本地草稿模型地址")
     draft_fallback = Column(Boolean, nullable=True, default=True, comment="本地失败时是否回退线上模型")
+    draft_think = Column(Boolean, nullable=True, default=False, comment="本地模型是否开启思考")
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

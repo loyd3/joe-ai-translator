@@ -12,11 +12,7 @@
         </el-tag>
       </div>
       <div class="header-actions">
-        <el-tooltip content="主题设置" placement="bottom">
-          <el-button circle class="icon-btn" @click="openThemeSettings">
-            <el-icon><Sunny /></el-icon>
-          </el-button>
-        </el-tooltip>
+        
         <el-button type="primary" :loading="saving" @click="save">
           <el-icon><Select /></el-icon>
           保存修改

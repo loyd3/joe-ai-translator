@@ -2986,17 +2986,16 @@ async def upload_and_translate_file(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
     source_lang: str = Form("auto"),
-    target_lang: str = Form("en"),
+    target_lang: str = Form("zh"),
     literary_type: str = Form("general"),
     reference_document_ids: Optional[str] = Form(None),
     user_requirements: Optional[str] = Form(None),
     style_agent_id: Optional[int] = Form(None),
-    auto_run: bool = Form(True, description="是否自动执行四步流程"),
     collab_mode: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
-    上传文件并创建翻译任务。支持：txt, docx, pdf, mobi 及 md/html/xml/json/csv 等文本格式；可选自动执行四步流程。
+    上传文件并创建翻译任务。支持：txt, docx, pdf, mobi 及 md/html/xml/json/csv 等文本格式。
     """
     file_extension = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
     if file_extension not in SUPPORTED_UPLOAD_EXTENSIONS:
@@ -3039,22 +3038,8 @@ async def upload_and_translate_file(
         )
         db.add(paragraph)
     db.commit()
-    if auto_run:
-        mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
-        try:
-            await _execute_step1(translation.id, db)
-            await _execute_step2(translation.id, db)
-            await _execute_step3(translation.id, db)
-            await _execute_step4(translation.id, db)
-            db.refresh(translation)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"自动执行四步流程失败: {str(e)}")
-        finally:
-            reset_collab_mode(mode_token)
     return {
-        "message": "文件上传成功" + ("，四步流程已自动执行完成" if auto_run else "，翻译任务已创建"),
+        "message": "文件上传成功，翻译任务已创建",
         "translation_id": translation.id,
         "filename": file.filename,
         "total_chunks": len(chunks),
@@ -3068,17 +3053,16 @@ async def upload_and_translate_file(
 async def upload_and_translate_batch(
     files: List[UploadFile] = File(..., description="多个文件"),
     source_lang: str = Form("auto"),
-    target_lang: str = Form("en"),
+    target_lang: str = Form("zh"),
     literary_type: str = Form("general"),
     reference_document_ids: Optional[str] = Form(None),
     user_requirements: Optional[str] = Form(None),
     style_agent_id: Optional[int] = Form(None),
-    auto_run: bool = Form(True, description="是否对每个任务自动执行四步流程"),
     collab_mode: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
-    批量上传文件并创建多个翻译任务。每个文件对应一个任务；可选对每个任务自动执行四步流程。
+    批量上传文件并创建多个翻译任务。每个文件对应一个任务。
     """
     if not files:
         raise HTTPException(status_code=400, detail="请至少上传一个文件")
@@ -3176,14 +3160,8 @@ async def upload_and_translate_batch(
         })
 
     created_ids = [r["translation_id"] for r in results if r.get("translation_id")]
-    if auto_run and created_ids:
-        # 后台按任务跑四步，避免 HTTP 请求卡住导致前端超时、看起来像上传坏了
-        asyncio.create_task(_run_batch_workflow_background(created_ids))
-
     ok = len(created_ids)
     msg = f"批量上传完成，共 {len(files)} 个文件，成功 {ok} 个"
-    if auto_run and created_ids:
-        msg += "，已加入翻译队列"
 
     return {
         "message": msg,

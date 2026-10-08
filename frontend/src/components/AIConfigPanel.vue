@@ -47,6 +47,10 @@
         <el-form-item label="Ollama 地址">
           <el-input v-model="form.draft_base_url" placeholder="http://localhost:11434/v1" />
         </el-form-item>
+        <el-form-item label="思考模式">
+          <el-switch v-model="form.draft_think" active-text="开启" inactive-text="关闭" />
+          <div class="form-hint">Qwen3 / qwen3.8 等支持思考的模型生效。关闭后直接出译文，更省时间和显存。</div>
+        </el-form-item>
         <el-form-item>
           <el-checkbox v-model="form.draft_fallback">本地失败时改用线上模型</el-checkbox>
         </el-form-item>
@@ -245,6 +249,7 @@ const form = ref({
   draft_model: 'llama3.2',
   draft_base_url: 'http://localhost:11434/v1',
   draft_fallback: true,
+  draft_think: false,
 })
 
 const currentProviderMeta = computed(() =>
@@ -290,6 +295,7 @@ async function load() {
       draft_model: data.draft_model || 'llama3.2',
       draft_base_url: data.draft_base_url || 'http://localhost:11434/v1',
       draft_fallback: data.draft_fallback !== false,
+      draft_think: data.draft_think === true,
     }
     if (!form.value.model) {
       form.value.model = currentProviderMeta.value?.default_model || ''
@@ -341,6 +347,7 @@ async function save() {
       draft_model: form.value.draft_model || undefined,
       draft_base_url: form.value.draft_base_url || undefined,
       draft_fallback: form.value.draft_fallback,
+      draft_think: form.value.draft_think,
     }
     if (form.value.api_key) payload.api_key = form.value.api_key
     if (form.value.draft_api_key) payload.draft_api_key = form.value.draft_api_key

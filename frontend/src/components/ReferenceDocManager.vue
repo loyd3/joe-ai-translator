@@ -210,32 +210,20 @@ const loadDocuments = async () => {
   }
 }
 
-const binaryExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3'])
 const handleFileChange = async (file: any) => {
   const raw = file?.raw
   if (!raw) return
-  const ext = (file.name || '').split('.').pop()?.toLowerCase()
-  if (binaryExtensions.has(ext)) {
-    try {
-      const formData = new FormData()
-      formData.append('file', raw)
-      const res = await literaryApi.parseFile(formData)
-      form.value.content = res.data?.text ?? ''
-      if (!form.value.name) form.value.name = (file.name || '').replace(/\.[^.]+$/, '')
-      if (form.value.content) ElMessage.success('文件已解析')
-      else ElMessage.error('未能从文件中提取到正文')
-    } catch (e: any) {
-      ElMessage.error(e?.response?.data?.detail || '文件解析失败')
-    }
-    return
+  try {
+    const formData = new FormData()
+    formData.append('file', raw)
+    const res = await literaryApi.parseFile(formData)
+    form.value.content = res.data?.text ?? ''
+    if (!form.value.name) form.value.name = (file.name || '').replace(/\.[^/.]+$/, '')
+    if (form.value.content.trim()) ElMessage.success('文件已解析')
+    else ElMessage.error('未能从文件中提取到正文')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '文件解析失败')
   }
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    form.value.content = e.target?.result as string
-    if (!form.value.name) form.value.name = file.name.replace(/\.[^/.]+$/, '')
-    ElMessage.success('文件已读取')
-  }
-  reader.readAsText(raw, 'UTF-8')
 }
 
 const createDoc = async () => {

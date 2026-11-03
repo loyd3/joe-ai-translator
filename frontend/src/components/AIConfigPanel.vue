@@ -42,7 +42,39 @@
       </p>
       <el-form label-position="top" class="config-form">
         <el-form-item label="模型">
-          <el-input v-model="form.draft_model" placeholder="例如 qwen2.5:14b" clearable />
+          <el-select
+            v-model="form.draft_model"
+            class="model-select"
+            filterable
+            placeholder="选择已有模型"
+          >
+            <el-option
+              v-for="name in localModelOptions"
+              :key="name"
+              :label="name"
+              :value="name"
+            />
+          </el-select>
+          <div class="model-picker">
+            <el-input
+              v-model="newLocalModel"
+              placeholder="新增模型名，例如 qwen2.5:32b"
+              clearable
+              @keyup.enter="storePreset('ollama', newLocalModel, 'local')"
+            />
+            <el-button :loading="presetBusy === 'local'" @click="storePreset('ollama', newLocalModel, 'local')">预存</el-button>
+          </div>
+          <div class="preset-list" v-if="presetsFor('ollama').length">
+            <span class="form-hint">已预存，点一下即可选用</span>
+            <el-tag
+              v-for="item in presetsFor('ollama')"
+              :key="item.id"
+              closable
+              class="preset-tag"
+              @click="form.draft_model = item.model"
+              @close="removePreset(item)"
+            >{{ item.model }}</el-tag>
+          </div>
         </el-form-item>
         <el-form-item label="Ollama 地址">
           <el-input v-model="form.draft_base_url" placeholder="http://localhost:11434/v1" />
@@ -86,13 +118,38 @@
         </el-form-item>
 
         <el-form-item label="模型">
-          <el-input
+          <el-select
             v-model="form.model"
-            placeholder="例如 deepseek-chat、gpt-4o"
-            clearable
-          />
-          <div class="form-hint" v-if="currentProviderMeta?.models?.length">
-            常用参考：{{ currentProviderMeta.models.slice(0, 4).join('、') }}
+            class="model-select"
+            filterable
+            placeholder="选择已有模型"
+          >
+            <el-option
+              v-for="name in onlineModelOptions"
+              :key="name"
+              :label="name"
+              :value="name"
+            />
+          </el-select>
+          <div class="model-picker">
+            <el-input
+              v-model="newOnlineModel"
+              placeholder="新增模型名，例如 gpt-4.1"
+              clearable
+              @keyup.enter="storePreset(form.provider, newOnlineModel, 'online')"
+            />
+            <el-button :loading="presetBusy === 'online'" @click="storePreset(form.provider, newOnlineModel, 'online')">预存</el-button>
+          </div>
+          <div class="form-hint">常用模型在上面的列表里。新模型点「预存」后会留在当前提供商下，下次还能选。</div>
+          <div class="preset-list" v-if="presetsFor(form.provider).length">
+            <el-tag
+              v-for="item in presetsFor(form.provider)"
+              :key="item.id"
+              closable
+              class="preset-tag"
+              @click="form.model = item.model"
+              @close="removePreset(item)"
+            >{{ item.model }}</el-tag>
           </div>
         </el-form-item>
 
@@ -222,8 +279,12 @@ const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 const testingDraft = ref(false)
+const presetBusy = ref('')
+const newLocalModel = ref('')
+const newOnlineModel = ref('')
 const advancedOpen = ref<string[]>(['advanced'])
 const providers = ref<ProviderMeta[]>([])
+const savedModels = ref<{ id: number; provider: string; model: string }[]>([])
 const info = ref<any>({
   provider: 'deepseek',
   has_api_key: false,
@@ -261,6 +322,26 @@ const showBaseUrl = computed(() => {
   return p === 'custom' || p === 'ollama' || !!currentProviderMeta.value?.allow_base_url_override
 })
 
+function presetsFor(provider: string) {
+  return savedModels.value.filter((item) => item.provider === provider)
+}
+
+function modelOptions(provider: string, current: string) {
+  const builtin = providers.value.find((item) => item.id === provider)?.models || []
+  const names: string[] = []
+  const push = (name: string) => {
+    const cleaned = (name || '').trim()
+    if (cleaned && !names.includes(cleaned)) names.push(cleaned)
+  }
+  builtin.forEach(push)
+  presetsFor(provider).forEach((item) => push(item.model))
+  push(current)
+  return names
+}
+
+const onlineModelOptions = computed(() => modelOptions(form.value.provider, form.value.model))
+const localModelOptions = computed(() => modelOptions('ollama', form.value.draft_model))
+
 const helpLinks = computed(() => {
   const meta = currentProviderMeta.value
   if (!meta?.docs_url) return []
@@ -274,6 +355,7 @@ async function load() {
     const data = res.data
     info.value = data
     providers.value = Array.isArray(data.available_providers) ? data.available_providers : []
+    savedModels.value = Array.isArray(data.saved_models) ? data.saved_models : []
     if (!providers.value.length) {
       const catalog = await systemApi.listAIProviders()
       providers.value = catalog.data?.providers || []
@@ -311,10 +393,53 @@ function selectProvider(id: string) {
   if (form.value.provider === id) return
   form.value.provider = id
   const meta = providers.value.find((p) => p.id === id)
-  form.value.model = meta?.default_model || meta?.models?.[0] || ''
+  form.value.model = meta?.default_model || meta?.models?.[0] || presetsFor(id).at(-1)?.model || ''
   form.value.base_url = meta?.base_url || ''
   form.value.api_key = ''
   testResult.value = null
+}
+
+async function storePreset(provider: string, model: string, busyKey: 'local' | 'online') {
+  const name = (model || '').trim()
+  if (!provider) return
+  if (!name) {
+    ElMessage.warning('请先填写要预存的模型名')
+    return
+  }
+  if (presetsFor(provider).some((item) => item.model === name)) {
+    if (busyKey === 'local') form.value.draft_model = name
+    else form.value.model = name
+    ElMessage.success('这个模型已经预存')
+    return
+  }
+  presetBusy.value = busyKey
+  try {
+    const res = await systemApi.addAIModel({ provider, model: name })
+    if (!savedModels.value.some((item) => item.id === res.data.id)) {
+      savedModels.value = [...savedModels.value, res.data]
+    }
+    if (busyKey === 'local') {
+      form.value.draft_model = res.data.model
+      newLocalModel.value = ''
+    } else {
+      form.value.model = res.data.model
+      newOnlineModel.value = ''
+    }
+    ElMessage.success('模型已预存')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '预存失败')
+  } finally {
+    presetBusy.value = ''
+  }
+}
+
+async function removePreset(item: { id: number; provider: string; model: string }) {
+  try {
+    await systemApi.deleteAIModel(item.id)
+    savedModels.value = savedModels.value.filter((row) => row.id !== item.id)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '移除失败')
+  }
 }
 
 async function save() {
@@ -554,6 +679,34 @@ defineExpose({ reload: load })
     border-color: rgb(var(--primary-rgb));
     background: rgba(var(--primary-rgb), 0.06);
   }
+}
+
+.model-picker {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+
+  .el-input {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.model-select {
+  width: 100%;
+}
+
+.preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.preset-tag {
+  cursor: pointer;
 }
 
 .config-form {

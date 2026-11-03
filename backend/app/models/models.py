@@ -2,7 +2,7 @@
 数据模型定义
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey, Enum
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Float, JSON, ForeignKey, Enum, UniqueConstraint
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -282,6 +282,19 @@ class AIConfig(Base):
     draft_fallback = Column(Boolean, nullable=True, default=True, comment="本地失败时是否回退线上模型")
     draft_think = Column(Boolean, nullable=True, default=False, comment="本地模型是否开启思考")
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class AIModelPreset(Base):
+    """用户预存的模型名，按提供商分开，可反复选用。"""
+    __tablename__ = "ai_model_presets"
+    __table_args__ = (
+        UniqueConstraint("provider", "model", name="uq_ai_model_preset_provider_model"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String(50), nullable=False, index=True, comment="提供商 id")
+    model = Column(String(200), nullable=False, comment="模型名")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class WritingStyleAgent(Base):

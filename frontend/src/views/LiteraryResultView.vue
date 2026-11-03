@@ -13,11 +13,17 @@
       </div>
       <div class="header-actions">
         
-        <el-button type="primary" :loading="saving" @click="save">
+        <el-tooltip content="把定稿改写成更贴近目标语言的表达，去掉翻译腔" placement="bottom">
+          <el-button :loading="localizing" :disabled="saving" @click="startLocalize">
+            <el-icon v-if="!localizing"><MagicStick /></el-icon>
+            {{ localizeLabel }}
+          </el-button>
+        </el-tooltip>
+        <el-button type="primary" :loading="saving" :disabled="localizing" @click="save">
           <el-icon><Select /></el-icon>
           保存修改
         </el-button>
-        <el-button :loading="exporting" @click="showExport = true">
+        <el-button :loading="exporting" :disabled="localizing" @click="showExport = true">
           <el-icon><Download /></el-icon>
           导出译文
         </el-button>
@@ -125,7 +131,7 @@
                       circle
                       class="icon-btn"
                       :loading="retranslatingId === para.id"
-                      :disabled="!!retranslatingId && retranslatingId !== para.id"
+                      :disabled="localizing || (!!retranslatingId && retranslatingId !== para.id)"
                       @click.stop="retranslateParagraph(para)"
                     >
                       <el-icon v-if="retranslatingId !== para.id"><RefreshRight /></el-icon>
@@ -137,7 +143,7 @@
                       circle
                       class="icon-btn"
                       :type="miniEditId === para.id ? 'primary' : 'default'"
-                      :disabled="retranslatingId === para.id"
+                      :disabled="localizing || retranslatingId === para.id"
                       @click.stop="toggleMiniEdit(para)"
                     >
                       <el-icon>
@@ -154,6 +160,7 @@
                 type="textarea"
                 :autosize="{ minRows: 3, maxRows: 16 }"
                 placeholder="该段译文"
+                :disabled="localizing"
                 @input="para.dirty = true"
               />
               <pre v-else-if="para.editedText">{{ para.editedText }}</pre>
@@ -212,10 +219,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, inject } from 'vue'
+import { ref, computed, watch, nextTick, inject, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Select, Download, Grid, DocumentCopy, View, Edit, Sunny, RefreshRight } from '@element-plus/icons-vue'
+import { ArrowLeft, Select, Download, Grid, DocumentCopy, View, Edit, Sunny, RefreshRight, MagicStick } from '@element-plus/icons-vue'
 import { literaryApi } from '@/api'
 
 const openThemeSettings = inject<() => void>('openThemeSettings', () => {})
@@ -239,6 +246,10 @@ const selectedParagraphId = ref<number | null>(null)
 const rightMode = ref<'read' | 'bulk'>('read')
 const miniEditId = ref<number | null>(null)
 const retranslatingId = ref<number | null>(null)
+const localizing = ref(false)
+const localizeProgress = ref({ status: 'idle', done: 0, total: 0, message: '', error: '' })
+let localizeTimer: number | null = null
+let localizeWatchId = 0
 const fullSource = ref('')
 const fullTranslation = ref('')
 const loadingFull = ref(false)
@@ -255,6 +266,13 @@ const id = computed(() => {
   if (props.translationId != null && props.translationId > 0) return props.translationId
   const raw = route.params.id
   return raw ? Number(raw) : 0
+})
+
+const localizeLabel = computed(() => {
+  if (!localizing.value) return '一键本地化'
+  const { done, total, message } = localizeProgress.value
+  if (total > 0) return `本地化 ${done}/${total}`
+  return message || '本地化中'
 })
 
 const pageCount = computed(() => Math.ceil(paragraphTotal.value / PAGE_SIZE) || 0)
@@ -325,6 +343,8 @@ const loadPage = async (page: number) => {
 
 const load = async () => {
   if (!id.value) return
+  stopLocalizePoll()
+  localizing.value = false
   loading.value = true
   compareMode.value = 'full'
   fullSource.value = ''
@@ -337,6 +357,16 @@ const load = async () => {
     const res = await literaryApi.getTranslation(id.value, false, false)
     task.value = res.data
     await loadFullText()
+    try {
+      const statusRes = await literaryApi.getLocalizeStatus(id.value)
+      localizeProgress.value = statusRes.data
+      if (statusRes.data.status === 'running') {
+        localizing.value = true
+        startLocalizePoll()
+      }
+    } catch {
+      // 进度查询失败不影响阅读定稿
+    }
   } catch (e) {
     ElMessage.error('加载失败')
   } finally {
@@ -462,6 +492,99 @@ const retranslateParagraph = async (para: any) => {
   }
 }
 
+const stopLocalizePoll = () => {
+  if (localizeTimer != null) {
+    window.clearInterval(localizeTimer)
+    localizeTimer = null
+  }
+}
+
+const refreshLocalizedText = async () => {
+  if (compareMode.value === 'segment') {
+    await loadPage(paragraphPage.value || 1)
+    fullSource.value = ''
+    fullTranslation.value = ''
+    return
+  }
+  paragraphs.value = []
+  await loadFullText()
+}
+
+const pollLocalizeOnce = async () => {
+  if (!id.value) return
+  const watching = id.value
+  const res = await literaryApi.getLocalizeStatus(watching)
+  if (id.value !== watching || localizeWatchId !== watching) return
+  localizeProgress.value = res.data
+  if (res.data.status === 'running') {
+    localizing.value = true
+    return
+  }
+  if (!localizing.value) {
+    stopLocalizePoll()
+    return
+  }
+  localizing.value = false
+  stopLocalizePoll()
+  if (res.data.status === 'done') {
+    await refreshLocalizedText()
+    ElMessage.success('已按目标语言重新整理全篇表达')
+    return
+  }
+  if (res.data.status === 'failed') {
+    ElMessage.error(res.data.error || '本地化失败')
+  }
+}
+
+const startLocalizePoll = () => {
+  stopLocalizePoll()
+  localizeWatchId = id.value
+  localizeTimer = window.setInterval(() => {
+    pollLocalizeOnce().catch(() => {
+      localizing.value = false
+      stopLocalizePoll()
+    })
+  }, 2000)
+}
+
+const LANG_NAMES: Record<string, string> = {
+  zh: '中文', 'zh-TW': '繁体中文', en: '英语', ja: '日语', ko: '韩语',
+  fr: '法语', de: '德语', es: '西班牙语', it: '意大利语', pt: '葡萄牙语', ru: '俄语',
+}
+const targetLangName = () => LANG_NAMES[task.value?.target_lang] || task.value?.target_lang || '目标语言'
+
+const startLocalize = async () => {
+  if (!id.value || localizing.value) return
+  try {
+    await ElMessageBox.confirm(
+      `将把当前定稿整体改写成更贴近${targetLangName()}的文章：保留原意、事实和段落，去掉翻译腔，并统一成这篇自己的说法。当前译文会被覆盖。`,
+      '一键本地化',
+      { type: 'warning', confirmButtonText: '开始本地化', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  let requested = false
+  try {
+    if (paragraphs.value.some((item: any) => item.dirty)) await save(false)
+    requested = true
+    localizing.value = true
+    localizeProgress.value = { status: 'running', done: 0, total: 0, message: '正在准备', error: '' }
+    const res = await literaryApi.startLocalize(id.value)
+    localizeProgress.value = res.data
+    if (res.data.status === 'failed') {
+      localizing.value = false
+      ElMessage.error(res.data.error || '本地化失败')
+      return
+    }
+    startLocalizePoll()
+    await pollLocalizeOnce()
+  } catch (error: any) {
+    localizing.value = false
+    if (requested) ElMessage.error(error?.response?.data?.detail || '本地化失败')
+  }
+}
+
 const doExport = async () => {
   if (!id.value) return
   await save(false)
@@ -499,6 +622,7 @@ const goBack = () => {
 }
 
 watch(id, load, { immediate: true })
+onUnmounted(stopLocalizePoll)
 </script>
 
 <style scoped lang="scss">
@@ -516,6 +640,8 @@ watch(id, load, { immediate: true })
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
   border-bottom: 1px solid var(--ins-line);
   flex-shrink: 0;
 

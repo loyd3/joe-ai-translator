@@ -301,18 +301,14 @@ function removeExtractFile(idx: number) {
   extractFiles.value.splice(idx, 1)
 }
 
-function readFileAsText(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(new Error(`读取失败：${file.name}`))
-    reader.readAsText(file, 'UTF-8')
-  })
+function isLegacyDoc(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.endsWith('.doc') && !lower.endsWith('.docx')
 }
 
-function isBinarySample(file: File): boolean {
-  const name = file.name.toLowerCase()
-  return name.endsWith('.docx') || name.endsWith('.pdf')
+function isWordOrPdf(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.endsWith('.docx') || lower.endsWith('.pdf') || isLegacyDoc(name)
 }
 
 function upsertExtractFile(name: string, text: string, sizeHint = 0) {
@@ -341,61 +337,46 @@ async function onFilesPicked(ev: Event) {
   }
 
   const picked = files.slice(0, remaining)
-  const binaryFiles = picked.filter(isBinarySample)
-  const textFiles = picked.filter((f) => !isBinarySample(f))
 
   let added = 0
   parsingFiles.value = true
   try {
-    // Word / PDF → 后端解析
-    if (binaryFiles.length) {
-      for (const file of binaryFiles) {
-        if (file.size > 8 * 1024 * 1024) {
-          ElMessage.warning(`「${file.name}」超过 8MB，已跳过`)
-          continue
-        }
-        if (file.name.toLowerCase().endsWith('.doc') && !file.name.toLowerCase().endsWith('.docx')) {
-          ElMessage.warning(`「${file.name}」为旧版 .doc，请另存为 .docx`)
-          continue
-        }
-      }
-      const okBinary = binaryFiles.filter(
-        (f) =>
-          f.size <= 8 * 1024 * 1024 &&
-          !(f.name.toLowerCase().endsWith('.doc') && !f.name.toLowerCase().endsWith('.docx'))
-      )
-      if (okBinary.length) {
-        try {
-          const { data } = await styleAgentApi.parseFiles(okBinary)
-          for (const s of data.sources || []) {
-            upsertExtractFile(s.name, s.text, s.chars)
-            added += 1
-          }
-          if (data.errors?.length) {
-            ElMessage.warning(data.errors.slice(0, 3).join('；'))
-          }
-        } catch (e: any) {
-          ElMessage.error(e?.response?.data?.detail || e?.message || 'Word/PDF 解析失败')
-        }
-      }
-    }
-
-    // 纯文本本地读
-    for (const file of textFiles) {
-      if (file.size > 2_000_000) {
-        ElMessage.warning(`「${file.name}」过大，已跳过（文本单文件建议 ≤ 2MB）`)
+    const accepted: File[] = []
+    for (const file of picked) {
+      if (isLegacyDoc(file.name)) {
+        ElMessage.warning(`「${file.name}」为旧版 .doc，请另存为 .docx`)
         continue
       }
+      const binary = isWordOrPdf(file.name)
+      const limit = binary ? 8 * 1024 * 1024 : 2_000_000
+      if (file.size > limit) {
+        ElMessage.warning(
+          binary
+            ? `「${file.name}」超过 8MB，已跳过`
+            : `「${file.name}」过大，已跳过（文本单文件建议 ≤ 2MB）`
+        )
+        continue
+      }
+      accepted.push(file)
+    }
+    if (accepted.length) {
       try {
-        const text = (await readFileAsText(file)).trim()
-        if (text.length < 20) {
-          ElMessage.warning(`「${file.name}」内容过短或非文本，已跳过`)
-          continue
+        const { data } = await styleAgentApi.parseFiles(accepted)
+        for (const s of data.sources || []) {
+          const text = (s.text || '').trim()
+          const binary = isWordOrPdf(s.name)
+          if (!binary && text.length < 20) {
+            ElMessage.warning(`「${s.name}」内容过短或非文本，已跳过`)
+            continue
+          }
+          upsertExtractFile(s.name, text, s.chars)
+          added += 1
         }
-        upsertExtractFile(file.name, text, file.size)
-        added += 1
+        if (data.errors?.length) {
+          ElMessage.warning(data.errors.slice(0, 3).join('；'))
+        }
       } catch (e: any) {
-        ElMessage.error(e?.message || `无法读取 ${file.name}`)
+        ElMessage.error(e?.response?.data?.detail || e?.message || '文件解析失败')
       }
     }
   } finally {

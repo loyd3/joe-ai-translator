@@ -37,6 +37,7 @@ from app.models.models import (
     ReferenceDocument, LiteraryTranslationStatus,
     ProfessionalTerm, TranslationTermSummary
 )
+from app.core.text_decode import decode_text_bytes
 from app.core.ai_client import (
     AIClient,
     get_ai_client,
@@ -93,6 +94,9 @@ class WorkflowCancelled(Exception):
 
 # 每任务一个递增代数：终止/重开都会 +1，旧后台协程发现代数不一致即退出，避免卡在旧译文上
 WORKFLOW_GENERATION: dict[int, int] = {}
+# 一键本地化进度。进程内状态，刷新页面后若仍在跑可继续轮询。
+LOCALIZE_JOBS: dict[int, dict] = {}
+LOCALIZE_BATCH_CHARS = 2800
 _current_workflow_generation: ContextVar[Optional[int]] = ContextVar(
     "_current_workflow_generation", default=None
 )
@@ -1757,6 +1761,251 @@ async def retranslate_paragraph(
     return paragraph
 
 
+def _paragraph_current_text(paragraph) -> str:
+    """当前展示用的定稿：用户改过的优先，否则用定稿。"""
+    return (
+        paragraph.user_edited_text
+        or paragraph.step4_finalization
+        or paragraph.translated_text
+        or paragraph.step3_revision
+        or ""
+    )
+
+
+def _localize_excerpt(paragraphs: list, limit: int = 1600) -> str:
+    """长文取开头、中段、结尾，供提炼统一文风。"""
+    texts = [( _paragraph_current_text(p) or "" ).strip() for p in paragraphs]
+    texts = [t for t in texts if t]
+    if not texts:
+        return ""
+    joined = PARA_SEP.join(texts)
+    if len(joined) <= limit * 3:
+        return joined
+    head_n = max(1, len(texts) // 10)
+    mid = len(texts) // 2
+    chunks = [
+        ("开头", texts[:head_n]),
+        ("中段", texts[mid: mid + head_n]),
+        ("结尾", texts[-head_n:]),
+    ]
+    parts = []
+    for label, group in chunks:
+        body = PARA_SEP.join(group)[:limit]
+        parts.append(f"【{label}】\n{body}")
+    return "\n\n".join(parts)
+
+
+def _localize_batches(paragraphs: list) -> list:
+    batches: list[list] = []
+    current: list = []
+    current_size = 0
+    for para in paragraphs:
+        size = len(_paragraph_current_text(para) or "")
+        if current and current_size + size > LOCALIZE_BATCH_CHARS:
+            batches.append(current)
+            current = [para]
+            current_size = size
+        else:
+            current.append(para)
+            current_size += size
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _apply_localized_parts(paragraphs: list, localized_parts: List[str], fallback_texts: List[str]) -> None:
+    for para, text, fallback in zip(paragraphs, localized_parts, fallback_texts):
+        cleaned = AIClient._strip_translation_wrappers(text or "")
+        if not cleaned.strip():
+            cleaned = (fallback or "").strip()
+        para.user_edited_text = cleaned
+        para.translated_text = cleaned
+        para.is_edited = True
+
+
+async def _localize_paragraph_batch(translation, batch: list, db: Session, voice: str, guidance: str) -> None:
+    fallback_texts = [_paragraph_current_text(p) for p in batch]
+    batch_source = _pack_marked_paragraphs([p.source_text or "" for p in batch])
+    batch_draft = _pack_marked_paragraphs(fallback_texts)
+    result = await call_for_step(
+        4,
+        lambda c, src=batch_source, draft=batch_draft, guide=guidance, tone=voice, count=len(batch): c.literary_localize(
+            src,
+            draft,
+            translation.source_lang,
+            translation.target_lang,
+            translation.literary_type,
+            guidance=guide or None,
+            voice=tone or None,
+            paragraph_count=count,
+        ),
+    )
+    localized_text = result.get("localized_translation") or batch_draft
+    localized_parts = _align_finalized_parts(localized_text, fallback_texts)
+    _apply_localized_parts(batch, localized_parts, fallback_texts)
+    db.commit()
+
+
+async def _localize_batch_with_retry(translation, batch: list, db: Session, voice: str, guidance: str) -> None:
+    """输出被截断时把这一批拆开再写，避免整篇失败。"""
+    try:
+        await _localize_paragraph_batch(translation, batch, db, voice, guidance)
+    except Exception as exc:
+        db.rollback()
+        if len(batch) <= 1 or "截断" not in str(exc):
+            raise
+        mid = len(batch) // 2
+        await _localize_batch_with_retry(translation, batch[:mid], db, voice, guidance)
+        await _localize_batch_with_retry(translation, batch[mid:], db, voice, guidance)
+
+
+def _localize_guidance(translation: LiteraryTranslation, db: Session) -> str:
+    guidance = build_prompt_guidance(translation, db, include_story=True)
+    requirements = (translation.user_requirements or "").strip()
+    if requirements:
+        block = f"## 用户要求\n{requirements[:2000]}"
+        guidance = f"{guidance}\n\n{block}".strip() if guidance else block
+    return guidance
+
+
+async def _run_localize_background(translation_id: int) -> None:
+    """把已定稿译文整篇改写成更贴近目标语言的表达。"""
+    db = SessionLocal()
+    job = LOCALIZE_JOBS[translation_id]
+    mode_token = None
+    try:
+        translation = db.query(LiteraryTranslation).filter(
+            LiteraryTranslation.id == translation_id
+        ).first()
+        if not translation:
+            raise RuntimeError("任务不存在")
+        paragraphs = db.query(LiteraryParagraph).filter(
+            LiteraryParagraph.translation_id == translation_id
+        ).order_by(LiteraryParagraph.paragraph_index).all()
+        if not paragraphs or not any(_paragraph_current_text(p).strip() for p in paragraphs):
+            raise RuntimeError("还没有可本地化的定稿")
+
+        mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
+        guidance = _localize_guidance(translation, db)
+        batches = _localize_batches(paragraphs)
+        job["total"] = len(batches)
+        job["done"] = 0
+
+        voice = ""
+        if len(batches) > 1:
+            job["message"] = "正在确定全篇风格"
+            excerpt = _sanitize_text_for_api(_localize_excerpt(paragraphs))
+            if excerpt:
+                try:
+                    voice = await call_for_step(
+                        4,
+                        lambda c, sample=excerpt, guide=guidance: c.literary_localize_voice(
+                            sample,
+                            translation.source_lang,
+                            translation.target_lang,
+                            translation.literary_type,
+                            guidance=guide or None,
+                        ),
+                    )
+                    if not isinstance(voice, str):
+                        voice = ""
+                except Exception as exc:
+                    print(f"[Localize] voice brief failed, continue without it: {exc}")
+                    voice = ""
+
+        for index, batch in enumerate(batches, start=1):
+            job["message"] = f"正在本地化 {index}/{len(batches)}"
+            await _localize_batch_with_retry(translation, batch, db, voice, guidance)
+            job["done"] = index
+
+        paragraphs = db.query(LiteraryParagraph).filter(
+            LiteraryParagraph.translation_id == translation_id
+        ).order_by(LiteraryParagraph.paragraph_index).all()
+        translation.final_translation = PARA_SEP.join(
+            _paragraph_current_text(p) for p in paragraphs
+        )
+        db.commit()
+        job["status"] = "done"
+        job["message"] = "本地化完成"
+        job["error"] = ""
+    except Exception as exc:
+        db.rollback()
+        job["status"] = "failed"
+        job["error"] = str(exc)
+        job["message"] = "本地化失败"
+        print(f"[Localize] {translation_id} failed: {exc}")
+    finally:
+        if mode_token is not None:
+            reset_collab_mode(mode_token)
+        db.close()
+
+
+def _localize_job_payload(translation_id: int) -> dict:
+    job = LOCALIZE_JOBS.get(translation_id) or {}
+    return {
+        "status": job.get("status") or "idle",
+        "done": int(job.get("done") or 0),
+        "total": int(job.get("total") or 0),
+        "message": job.get("message") or "",
+        "error": job.get("error") or "",
+    }
+
+
+@router.post("/translations/{translation_id}/localize")
+async def start_localize(
+    translation_id: int,
+    db: Session = Depends(get_db),
+):
+    """一键本地化：把定稿整体改写成更贴近目标语言的文章。"""
+    existing = LOCALIZE_JOBS.get(translation_id)
+    if existing and existing.get("status") == "running":
+        return _localize_job_payload(translation_id)
+
+    translation = db.query(LiteraryTranslation).filter(
+        LiteraryTranslation.id == translation_id
+    ).first()
+    if not translation:
+        raise HTTPException(status_code=404, detail="Translation not found")
+
+    running_statuses = {
+        LiteraryTranslationStatus.TRANSLATING,
+        LiteraryTranslationStatus.VERIFYING,
+        LiteraryTranslationStatus.REVISING,
+        LiteraryTranslationStatus.FINALIZING,
+    }
+    if translation.status in running_statuses:
+        raise HTTPException(status_code=400, detail="翻译仍在进行，完成定稿后再本地化")
+
+    has_text = db.query(LiteraryParagraph.id).filter(
+        LiteraryParagraph.translation_id == translation_id,
+        (
+            (LiteraryParagraph.user_edited_text.isnot(None) & (LiteraryParagraph.user_edited_text != ""))
+            | (LiteraryParagraph.step4_finalization.isnot(None) & (LiteraryParagraph.step4_finalization != ""))
+            | (LiteraryParagraph.translated_text.isnot(None) & (LiteraryParagraph.translated_text != ""))
+        ),
+    ).first()
+    if not has_text:
+        raise HTTPException(status_code=400, detail="还没有可本地化的定稿")
+
+    LOCALIZE_JOBS[translation_id] = {
+        "status": "running",
+        "done": 0,
+        "total": 0,
+        "message": "正在准备",
+        "error": "",
+    }
+    LOCALIZE_JOBS[translation_id]["task"] = asyncio.create_task(
+        _run_localize_background(translation_id)
+    )
+    return _localize_job_payload(translation_id)
+
+
+@router.get("/translations/{translation_id}/localize")
+async def get_localize_status(translation_id: int):
+    """查询一键本地化进度。"""
+    return _localize_job_payload(translation_id)
+
+
 # ============================================================
 # 导出功能 - 支持多种格式
 # ============================================================
@@ -2619,13 +2868,8 @@ SUPPORTED_UPLOAD_EXTENSIONS = {
 
 
 def _decode_text_content(content: bytes) -> str:
-    """多种编码尝试解码"""
-    for encoding in ('utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin-1'):
-        try:
-            return content.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return content.decode('utf-8', errors='ignore')
+    """按 UTF-8 / GB18030 / Big5 / UTF-16 识别编码，避免 TXT 乱码。"""
+    return decode_text_bytes(content)
 
 
 def _extract_text_docx(content: bytes) -> str:

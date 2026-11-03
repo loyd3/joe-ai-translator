@@ -10,7 +10,9 @@ import openai
 
 from app.core.ai_client import get_settings, get_ai_client, reset_ai_clients
 from app.database import get_db
-from app.models.models import AIConfig
+from sqlalchemy.exc import IntegrityError
+
+from app.models.models import AIConfig, AIModelPreset
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -157,7 +159,33 @@ def _mask_key(key: Optional[str]) -> str:
     return k[:6] + "****" + k[-4:] if len(k) > 10 else "****"
 
 
-def _serialize_config(db_cfg: AIConfig, settings) -> Dict[str, Any]:
+def _list_saved_models(db: Session) -> List[Dict[str, Any]]:
+    rows = db.query(AIModelPreset).order_by(AIModelPreset.id.asc()).all()
+    return [{"id": row.id, "provider": row.provider, "model": row.model} for row in rows]
+
+
+def _clean_model_name(model: Optional[str]) -> str:
+    return " ".join((model or "").replace("\n", " ").split()).strip()
+
+
+def _remember_custom_model(db: Session, provider: str, model: Optional[str]) -> None:
+    """配置里用到、且不在内置列表中的模型，一并写入预存。"""
+    name = _clean_model_name(model)
+    if not name or provider not in _catalog_map():
+        return
+    builtin = _catalog_map()[provider].get("models") or []
+    if name in builtin:
+        return
+    exists = db.query(AIModelPreset).filter(
+        AIModelPreset.provider == provider,
+        AIModelPreset.model == name,
+    ).first()
+    if exists:
+        return
+    db.add(AIModelPreset(provider=provider, model=name))
+
+
+def _serialize_config(db_cfg: AIConfig, settings, saved_models: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "provider": db_cfg.provider,
         "api_key_masked": _mask_key(db_cfg.api_key),
@@ -180,6 +208,7 @@ def _serialize_config(db_cfg: AIConfig, settings) -> Dict[str, Any]:
         "draft_think": False if getattr(db_cfg, "draft_think", None) is None else bool(db_cfg.draft_think),
         "source": "database",
         "available_providers": PROVIDER_CATALOG,
+        "saved_models": saved_models,
     }
 
 
@@ -254,8 +283,9 @@ async def get_ai_config(db: Session = Depends(get_db)):
     """获取大模型配置（API Key 脱敏）"""
     db_cfg = db.query(AIConfig).filter(AIConfig.id == 1).first()
     settings = get_settings()
+    saved_models = _list_saved_models(db)
     if db_cfg:
-        return _serialize_config(db_cfg, settings)
+        return _serialize_config(db_cfg, settings, saved_models)
 
     catalog = _catalog_map().get(settings.ai_provider, {})
     env_model = {
@@ -298,6 +328,7 @@ async def get_ai_config(db: Session = Depends(get_db)):
         "draft_think": False,
         "source": "env",
         "available_providers": PROVIDER_CATALOG,
+        "saved_models": saved_models,
     }
 
 
@@ -397,6 +428,9 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
     if (db_cfg.draft_provider or "") == "custom" and not (db_cfg.draft_base_url or "").strip():
         raise HTTPException(status_code=400, detail="本地自定义提供商需要填写 API 地址")
 
+    _remember_custom_model(db, db_cfg.provider, db_cfg.model)
+    _remember_custom_model(db, "ollama", db_cfg.draft_model)
+
     db.commit()
     db.refresh(db_cfg)
 
@@ -412,7 +446,64 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
         "provider": db_cfg.provider,
         "model": db_cfg.model,
         "base_url": db_cfg.base_url or "",
+        "saved_models": _list_saved_models(db),
     }
+
+
+class AIModelPresetCreate(BaseModel):
+    provider: str
+    model: str
+
+
+@router.get("/ai-models")
+async def list_ai_models(db: Session = Depends(get_db)):
+    """已预存的模型名。"""
+    return {"models": _list_saved_models(db)}
+
+
+@router.post("/ai-models")
+async def add_ai_model(request: AIModelPresetCreate, db: Session = Depends(get_db)):
+    """新增并预存一个模型名，同一提供商下重复添加直接返回已有记录。"""
+    provider = (request.provider or "").strip()
+    model = _clean_model_name(request.model)
+    if provider not in _catalog_map():
+        raise HTTPException(status_code=400, detail=f"不支持的提供商: {provider}")
+    if not model or len(model) > 200:
+        raise HTTPException(status_code=400, detail="请填写不超过 200 字的模型名")
+
+    existing = db.query(AIModelPreset).filter(
+        AIModelPreset.provider == provider,
+        AIModelPreset.model == model,
+    ).first()
+    if existing:
+        return {"id": existing.id, "provider": existing.provider, "model": existing.model}
+
+    row = AIModelPreset(provider=provider, model=model)
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(AIModelPreset).filter(
+            AIModelPreset.provider == provider,
+            AIModelPreset.model == model,
+        ).first()
+        if existing:
+            return {"id": existing.id, "provider": existing.provider, "model": existing.model}
+        raise
+    db.refresh(row)
+    return {"id": row.id, "provider": row.provider, "model": row.model}
+
+
+@router.delete("/ai-models/{preset_id}")
+async def delete_ai_model(preset_id: int, db: Session = Depends(get_db)):
+    """从预存列表移除模型，不影响当前正在使用的配置。"""
+    row = db.query(AIModelPreset).filter(AIModelPreset.id == preset_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="预存模型不存在")
+    db.delete(row)
+    db.commit()
+    return {"message": "已移除"}
 
 
 @router.post("/ai-config/test")

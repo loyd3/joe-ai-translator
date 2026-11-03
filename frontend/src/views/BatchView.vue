@@ -140,7 +140,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { translateApi } from '@/api'
+import { literaryApi, translateApi } from '@/api'
 
 // 语言列表
 const languages = ref<{ code: string; name: string }[]>([])
@@ -186,13 +186,19 @@ const clearAll = () => {
 }
 
 // 处理文件上传
-const handleFileUpload = (file: any) => {
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    inputText.value = e.target?.result as string
-    ElMessage.success(`已加载文件: ${file.name}`)
+const handleFileUpload = async (file: any) => {
+  const raw = file?.raw
+  if (!raw) return
+  try {
+    const form = new FormData()
+    form.append('file', raw)
+    const res = await literaryApi.parseFile(form)
+    inputText.value = res.data?.text ?? ''
+    if (inputText.value.trim()) ElMessage.success(`已加载文件: ${file.name}`)
+    else ElMessage.error('未能从文件中提取到正文')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '文件解析失败')
   }
-  reader.readAsText(file.raw)
 }
 
 // 开始批量翻译

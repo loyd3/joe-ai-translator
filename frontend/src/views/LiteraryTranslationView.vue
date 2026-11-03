@@ -1422,7 +1422,6 @@ const createNewTask = () => {
 }
 
 const allowedUploadExtensions = new Set(['txt', 'md', 'markdown', 'text', 'doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3', 'html', 'htm', 'xml', 'json', 'csv', 'log', 'rst', 'tex', 'srt', 'sub', 'vtt', 'yaml', 'yml', 'ini', 'cfg', 'properties'])
-const binaryUploadExtensions = new Set(['doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3'])
 const onCreateFileSelect = async (opts: { raw: File }) => {
   const file = opts?.raw
   if (!file) return
@@ -1435,37 +1434,22 @@ const onCreateFileSelect = async (opts: { raw: File }) => {
     ElMessage.warning('请选择支持的文件格式')
     return
   }
-  if (binaryUploadExtensions.has(ext)) {
-    try {
-      const form = new FormData()
-      form.append('file', file)
-      const res = await literaryApi.parseFile(form)
-      const text = res.data?.text ?? ''
-      if (text.length > MAX_TEXT_CHARS) {
-        ElMessage.warning(`文件内容过长（${(text.length / 10000).toFixed(1)}万字），已截取前 ${MAX_TEXT_CHARS / 10000} 万字符`)
-        newTaskForm.value.source_text = text.slice(0, MAX_TEXT_CHARS)
-      } else {
-        newTaskForm.value.source_text = text
-      }
-      if (!newTaskForm.value.title) newTaskForm.value.title = (file.name || '').replace(/\.[^.]+$/, '')
-      if (newTaskForm.value.source_text) ElMessage.success('文件已解析')
-      else ElMessage.error('未能从文件中提取到正文')
-    } catch (e: any) {
-      ElMessage.error(e?.response?.data?.detail || '文件解析失败')
-    }
-    return
-  }
-  const reader = new FileReader()
-  reader.onload = () => {
-    let text = (reader.result as string) || ''
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await literaryApi.parseFile(form)
+    let text = res.data?.text ?? ''
     if (text.length > MAX_TEXT_CHARS) {
       ElMessage.warning(`文件内容过长（${(text.length / 10000).toFixed(1)}万字），已截取前 ${MAX_TEXT_CHARS / 10000} 万字符`)
       text = text.slice(0, MAX_TEXT_CHARS)
     }
     newTaskForm.value.source_text = text
-    if (!newTaskForm.value.title) newTaskForm.value.title = file.name.replace(/\.[^.]+$/, '')
+    if (!newTaskForm.value.title) newTaskForm.value.title = (file.name || '').replace(/\.[^.]+$/, '')
+    if (text.trim()) ElMessage.success('文件已解析')
+    else ElMessage.error('未能从文件中提取到正文')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '文件解析失败')
   }
-  reader.readAsText(file, 'UTF-8')
 }
 
 const submitNewTask = async () => {

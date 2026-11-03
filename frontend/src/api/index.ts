@@ -165,6 +165,9 @@ export const systemApi = {
     timeout_seconds?: number
     use_draft_key?: boolean
   }) => api.post('/system/ai-config/test', data),
+  addAIModel: (data: { provider: string; model: string }) =>
+    api.post<{ id: number; provider: string; model: string }>('/system/ai-models', data),
+  deleteAIModel: (id: number) => api.delete(`/system/ai-models/${id}`),
 }
 
 // 文学翻译 API
@@ -320,6 +323,16 @@ export const literaryApi = {
   // 单段 AI 重译（四步流程，耗时较长）
   retranslateParagraph: (paragraphId: number, data?: { extra_requirements?: string }) =>
     api.post(`/literary/paragraphs/${paragraphId}/retranslate`, data || {}, { timeout: 300000 }),
+
+  startLocalize: (id: number) =>
+    api.post<{ status: string; done: number; total: number; message: string; error: string }>(
+      `/literary/translations/${id}/localize`,
+    ),
+
+  getLocalizeStatus: (id: number) =>
+    api.get<{ status: string; done: number; total: number; message: string; error: string }>(
+      `/literary/translations/${id}/localize`,
+    ),
   
   // ===== 导出 =====
 

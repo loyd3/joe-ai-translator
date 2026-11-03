@@ -659,6 +659,8 @@ Output only the translated text, no additional comments."""
         r"完整原文",
         r"待润色译文",
         r"待定稿译文(?:（[^】\]]*)?）?",
+        r"待本地化译文(?:（[^】\]]*)?）?",
+        r"本地化风格",
         r"原文结束",
         r"译文结束",
     )
@@ -1273,6 +1275,184 @@ Output only the translated text, no additional comments."""
                 "beauty_meaning_final": "意境传达到位",
                 "publishing_readiness": "基本具备出版条件",
                 "translator_note": ""
+            }
+
+    def _localize_system(self, system_prompt: str, guidance: Optional[str], voice: Optional[str]) -> str:
+        """本地化附加设定：事实跟原文，说法跟目标语言。"""
+        blocks = [system_prompt]
+        if voice and voice.strip():
+            blocks.append(
+                "## 本篇本地化风格（全篇必须统一，不要另起一种文风）\n" + voice.strip()
+            )
+        if guidance and guidance.strip():
+            blocks.append(
+                "## 附加设定\n"
+                "人名、专名、术语译法保持一致。"
+                "若文风里写着「以原文为准」，本地化时改为：事实、情节和情感方向以原文为准，"
+                "句式和说法以目标语言的本土表达为准。"
+                "译者习惯（句式、用词、语体、疏密、避免项）仍然遵守，并写成目标语言里的作者声音。\n"
+                + guidance.strip()
+            )
+        return "\n\n".join(blocks)
+
+    async def literary_localize_voice(
+        self,
+        excerpt: str,
+        source_lang: str,
+        target_lang: str,
+        literary_type: str = "general",
+        guidance: Optional[str] = None,
+    ) -> str:
+        """从定稿节选提炼全篇要统一的目标语作者声音，供分批本地化共用。"""
+        target_name = self.get_language_name(target_lang)
+        source_name = self.get_language_name(source_lang)
+        lit_type_name = self.get_literary_type_name(literary_type)
+        system_prompt = f"""你在把一篇{source_name}译成{target_name}的{lit_type_name}定稿，改写成更像{target_name}原创的文章。
+请只根据节选，写一段给后续改写用的风格说明，不要改写正文。
+
+要求：
+- 用{target_name}的写作习惯描述这篇该有的作者声音
+- 写明语体、句长与节奏、口气、要清掉的翻译腔、这篇特有的说法
+- 不要复述情节，不要引用长句
+- 全篇只用这一种声音
+
+只输出 JSON：{{"voice": "不超过 220 字"}}"""
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self._localize_system(system_prompt, guidance, None)},
+                {"role": "user", "content": f"【定稿节选】({target_name}):\n{excerpt}"},
+            ],
+            response_format={"type": "json_object"},
+            **self._sampling_kwargs(temperature=0.4, max_tokens=800),
+        )
+        import json
+        try:
+            result = json.loads(response.choices[0].message.content or "{}")
+            voice = (result.get("voice") or "").strip()
+            return voice[:400]
+        except Exception:
+            return ""
+
+    async def literary_localize(
+        self,
+        source_text: str,
+        draft_translation: str,
+        source_lang: str,
+        target_lang: str,
+        literary_type: str = "general",
+        guidance: Optional[str] = None,
+        voice: Optional[str] = None,
+        paragraph_count: Optional[int] = None,
+    ) -> dict:
+        """把定稿改写成贴近目标语言语境的文章，脱离翻译腔，并保持全篇一种风格。"""
+        source_name = self.get_language_name(source_lang)
+        target_name = self.get_language_name(target_lang)
+        lit_type_name = self.get_literary_type_name(literary_type)
+        marker_rule = ""
+        if paragraph_count and paragraph_count >= 1:
+            marker_rule = f"""
+
+## 段落对齐（必须遵守）
+- 输入原文和定稿已用 <<<PARA_0>>> ... <<<PARA_{paragraph_count - 1}>>> 标记分段
+- localized_translation 必须保留全部 {paragraph_count} 个标记，顺序与编号不得改动
+- 不得合并、拆分或增删段落；每个标记后只放该段改写后的正文
+- 空段保持为空
+- 禁止只用空行代替这些标记"""
+
+        if self.is_professional_type(literary_type):
+            system_prompt = f"""你是一位以{target_name}写作的{lit_type_name}作者。你会拿到从{source_name}译来的定稿。意思大体正确，但句子还跟着原文走，读起来像翻译，不像{target_name}里直接写成的专业文本。
+
+请把定稿整体改写成贴近{target_name}专业写作习惯的文本，并让全篇保持同一种语气。
+
+## 必须守住
+- 事实、数字、条件、义务、否定范围、术语和专名不改
+- 不增删信息，不解释，不摘要
+- 不文学化，不发挥
+
+## 要改的是说法
+- 按{target_name}专业文本的语序和衔接重组句子
+- 清掉源语言词序、逐词对应和生硬套话
+- 全篇用词层次一致
+{marker_rule}
+
+## 输出格式
+只输出 JSON：
+{{
+    "localized_translation": "本地化后的全文（若输入含 <<<PARA_N>>> 标记则必须原样保留）",
+    "voice_note": "一句话说明本篇采用的目标语语气"
+}}"""
+            temperature = 0.3
+        else:
+            genre_hint = ""
+            if literary_type == "poetry":
+                genre_hint = "\n- 保留诗行。把翻译腔换成目标语言里站得住的诗句，不要改成散文。"
+            elif literary_type == "drama":
+                genre_hint = "\n- 保留台词和舞台指示的区分。对白要像目标语言里说得出口的话。"
+            system_prompt = f"""你是一位以{target_name}为母语的{lit_type_name}作者。你会拿到一篇从{source_name}译来的定稿。意思大体正确，但还带着翻译腔：句式跟着原文，连接、节奏和说法不像{target_name}里原生写成的文章。
+
+请把定稿整篇改写成更贴近{target_name}语境的文章。让它读起来像原创，并形成这篇自己的统一风格。
+
+## 必须守住
+- 情节、事实、数字、人名、专名、逻辑关系和情感方向不改
+- 不增删信息，不写译者说明，不总结
+- 原文朴素就不要堆辞藻；原文锋利就不要磨成温吞。本土化的是说法，不是改掉文本的性格{genre_hint}
+
+## 要改的是表达
+- 拆掉源语言的词序和腔调，按{target_name}的行文习惯重组句子
+- 成语、口语、转折、称呼改成{target_name}里自然的说法，不要逐词对应
+- 全篇语气、节奏、用词层次一致，像同一个人写完
+- 可以调整句长和衔接，让文章有自己的呼吸，但不要换掉作者要说的话
+{marker_rule}
+
+## 输出格式
+只输出 JSON：
+{{
+    "localized_translation": "本地化后的全文（若输入含 <<<PARA_N>>> 标记则必须原样保留）",
+    "voice_note": "一两句话说明本篇形成的目标语风格"
+}}"""
+            temperature = 0.55
+
+        keep_structure_hint = (
+            f"请按全篇同一种目标语风格改写，并严格保留全部 {paragraph_count} 个 <<<PARA_N>>> 段落标记。"
+            if paragraph_count and paragraph_count >= 1
+            else "请按全篇同一种目标语风格改写，保持段落结构不变。"
+        )
+        messages = [
+            {"role": "system", "content": self._localize_system(system_prompt, guidance, voice)},
+            {
+                "role": "user",
+                "content": (
+                    f"【原文】({source_name}):\n{source_text}\n\n"
+                    f"【待本地化译文】({target_name}):\n{draft_translation}\n\n"
+                    f"{keep_structure_hint}"
+                ),
+            },
+        ]
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            **self._sampling_kwargs(
+                temperature=temperature,
+                max_tokens=max(self.effective_max_tokens or 0, 8192),
+            ),
+        )
+        message = response.choices[0].message
+        content = message.content or ""
+        finish = getattr(response.choices[0], "finish_reason", None)
+        if finish == "length":
+            raise RuntimeError("本地化输出被截断")
+        import json
+        try:
+            result = json.loads(content or "{}")
+            if not isinstance(result, dict):
+                raise ValueError("localize result is not an object")
+            return self._clean_translation_fields(result, "localized_translation")
+        except Exception:
+            return {
+                "localized_translation": self._strip_translation_wrappers(draft_translation),
+                "voice_note": "",
             }
 
     async def literary_translate_paragraph(

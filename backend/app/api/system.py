@@ -206,6 +206,11 @@ def _serialize_config(db_cfg: AIConfig, settings, saved_models: List[Dict[str, A
         "draft_base_url": db_cfg.draft_base_url or "http://localhost:11434/v1",
         "draft_fallback": True if db_cfg.draft_fallback is None else bool(db_cfg.draft_fallback),
         "draft_think": False if getattr(db_cfg, "draft_think", None) is None else bool(db_cfg.draft_think),
+        "term_hit_table_max_entries": (
+            int(db_cfg.term_hit_table_max_entries)
+            if getattr(db_cfg, "term_hit_table_max_entries", None) is not None
+            else 40
+        ),
         "source": "database",
         "available_providers": PROVIDER_CATALOG,
         "saved_models": saved_models,
@@ -260,6 +265,7 @@ class AIConfigUpdate(BaseModel):
     draft_base_url: Optional[str] = None
     draft_fallback: Optional[bool] = None
     draft_think: Optional[bool] = None
+    term_hit_table_max_entries: Optional[int] = Field(None, ge=10, le=200)
 
 
 class AIConfigTestRequest(BaseModel):
@@ -326,6 +332,7 @@ async def get_ai_config(db: Session = Depends(get_db)):
         "draft_base_url": settings.ollama_base_url or "http://localhost:11434/v1",
         "draft_fallback": True,
         "draft_think": False,
+        "term_hit_table_max_entries": 40,
         "source": "env",
         "available_providers": PROVIDER_CATALOG,
         "saved_models": saved_models,
@@ -420,6 +427,11 @@ async def update_ai_config(request: AIConfigUpdate, db: Session = Depends(get_db
         db_cfg.draft_think = bool(request.draft_think)
     elif getattr(db_cfg, "draft_think", None) is None:
         db_cfg.draft_think = False
+
+    if request.term_hit_table_max_entries is not None:
+        db_cfg.term_hit_table_max_entries = int(request.term_hit_table_max_entries)
+    elif getattr(db_cfg, "term_hit_table_max_entries", None) is None:
+        db_cfg.term_hit_table_max_entries = 40
 
     # 始终校验本地配置（配置页同时保存本地+线上，模式在开始翻译时再选）
     draft_meta = catalog.get(db_cfg.draft_provider or "ollama", {})

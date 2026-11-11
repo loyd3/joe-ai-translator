@@ -223,6 +223,10 @@ class LiteraryTranslationCreate(BaseModel):
     target_lang: str = Field(..., min_length=1)
     literary_type: LiteraryType = Field(default=LiteraryType.GENERAL)
     reference_document_ids: Optional[List[int]] = Field(default=None)
+    domain_dictionary_ids: Optional[List[int]] = Field(
+        default=None,
+        description="绑定的专业词典 ID；不传则按领域+语言对自动挂载默认词典",
+    )
     user_requirements: Optional[str] = Field(default=None, description="翻译需求说明（风格、术语等）")
     style_agent_id: Optional[int] = Field(default=None, description="文风智能体 ID，空则用系统默认")
     collab_mode: Optional[str] = Field(default=None, description="online|local|collab，空则用系统默认")
@@ -238,6 +242,7 @@ class LiteraryParagraphResponse(BaseModel):
     step2_verification: Optional[str]
     step3_revision: Optional[str]
     step4_finalization: Optional[str]
+    step5_localization: Optional[str] = None
     user_edited_text: Optional[str]
     is_edited: bool
     beauty_sound_score: Optional[float]
@@ -266,6 +271,7 @@ class LiteraryTranslationResponse(BaseModel):
     step2_verification: Optional[str]
     step3_revision: Optional[str]
     step4_finalization: Optional[str]
+    step5_localization: Optional[str] = None
     final_translation: Optional[str]
     current_step: int
     status: str
@@ -279,6 +285,7 @@ class LiteraryTranslationResponse(BaseModel):
     ai_provider: Optional[str]
     ai_model: Optional[str]
     reference_document_ids: List[int]
+    domain_dictionary_ids: List[int] = []
     user_requirements: Optional[str] = None
     style_agent_id: Optional[int] = None
     created_at: datetime
@@ -289,6 +296,7 @@ class LiteraryTranslationResponse(BaseModel):
     has_step2: bool = False
     has_step3: bool = False
     has_step4: bool = False
+    has_step5: bool = False
     paragraph_total: int = 0
 
     @field_serializer('created_at', 'updated_at', 'completed_at')
@@ -390,10 +398,13 @@ class LiteraryTranslationUpdate(BaseModel):
     group_name: Optional[str] = Field(default=None, max_length=200)
     source_text: Optional[str] = None
     final_translation: Optional[str] = None
-    status: Optional[str] = None  # 状态管理：pending, translating, verifying, revising, finalizing, completed, failed
+    status: Optional[str] = None  # pending|translating|verifying|revising|finalizing|localizing|completed|failed
     style_agent_id: Optional[int] = None
     user_requirements: Optional[str] = None
     literary_type: Optional[str] = None
+    domain_dictionary_ids: Optional[List[int]] = Field(
+        default=None, description="绑定的专业词典 ID 列表；传空列表表示不使用专业词典"
+    )
 
 
 # ========== 文风智能体 ==========
@@ -583,3 +594,97 @@ class TermExtractionResult(BaseModel):
     terms: List[TermItem]
     summary: str
     total_count: int
+
+
+# ============================================================
+# 外部专业词典 Schemas
+# ============================================================
+
+class DomainDictionaryCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    literary_type: Optional[str] = Field(default=None, description="领域；空=通用")
+    source_lang: str = Field(..., min_length=1)
+    target_lang: str = Field(..., min_length=1)
+    is_default_for_domain: bool = False
+    is_active: bool = True
+
+
+class DomainDictionaryUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = None
+    literary_type: Optional[str] = None
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
+    is_default_for_domain: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+class DomainDictionaryResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str]
+    literary_type: Optional[str]
+    source_lang: str
+    target_lang: str
+    source: str
+    is_active: bool
+    is_default_for_domain: bool
+    term_count: int
+    created_at: datetime
+    updated_at: Optional[datetime]
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, "isoformat") else str(dt)
+
+    class Config:
+        from_attributes = True
+
+
+class DomainDictionaryTermCreate(BaseModel):
+    source_term: str = Field(..., min_length=1, max_length=500)
+    target_term: str = Field(..., min_length=1, max_length=500)
+    aliases: Optional[List[str]] = None
+    category: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = None
+    priority: int = 0
+
+
+class DomainDictionaryTermUpdate(BaseModel):
+    source_term: Optional[str] = Field(default=None, max_length=500)
+    target_term: Optional[str] = Field(default=None, max_length=500)
+    aliases: Optional[List[str]] = None
+    category: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[int] = None
+
+
+class DomainDictionaryTermResponse(BaseModel):
+    id: int
+    dictionary_id: int
+    source_term: str
+    target_term: str
+    aliases: Optional[List[str]] = None
+    category: Optional[str]
+    description: Optional[str]
+    priority: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime]
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetime(self, dt: Optional[datetime], _info):
+        if not dt:
+            return None
+        try:
+            return dt.isoformat()
+        except (OSError, ValueError):
+            return dt.isoformat()[:19] if hasattr(dt, "isoformat") else str(dt)
+
+    class Config:
+        from_attributes = True

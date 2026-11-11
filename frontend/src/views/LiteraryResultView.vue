@@ -13,7 +13,7 @@
       </div>
       <div class="header-actions">
         
-        <el-tooltip content="把定稿改写成更贴近目标语言的表达，去掉翻译腔" placement="bottom">
+        <el-tooltip content="工作流第五步：从定稿重新本地化（覆盖现有本地化结果）" placement="bottom">
           <el-button :loading="localizing" :disabled="saving" @click="startLocalize">
             <el-icon v-if="!localizing"><MagicStick /></el-icon>
             {{ localizeLabel }}
@@ -269,7 +269,7 @@ const id = computed(() => {
 })
 
 const localizeLabel = computed(() => {
-  if (!localizing.value) return '一键本地化'
+  if (!localizing.value) return '重新本地化'
   const { done, total, message } = localizeProgress.value
   if (total > 0) return `本地化 ${done}/${total}`
   return message || '本地化中'
@@ -333,7 +333,7 @@ const loadPage = async (page: number) => {
   paragraphTotal.value = res.data.total
   paragraphs.value = (res.data.items || []).map((item: any) => ({
     ...item,
-    editedText: item.user_edited_text || item.step4_finalization || item.translated_text || item.step3_revision || item.step2_verification || item.step1_translation || '',
+    editedText: item.user_edited_text || item.step5_localization || item.step4_finalization || item.translated_text || item.step3_revision || item.step2_verification || item.step1_translation || '',
     dirty: false,
   }))
   if (!paragraphs.value.some((item: any) => item.id === selectedParagraphId.value)) {
@@ -375,7 +375,7 @@ const load = async () => {
 }
 
 const paragraphDisplayText = (item: any) =>
-  item.user_edited_text || item.editedText || item.step4_finalization || item.translated_text || item.step3_revision || item.step2_verification || item.step1_translation || ''
+  item.user_edited_text || item.editedText || item.step5_localization || item.step4_finalization || item.translated_text || item.step3_revision || item.step2_verification || item.step1_translation || ''
 
 const loadFullText = async () => {
   if (!id.value) return
@@ -469,7 +469,7 @@ const retranslateParagraph = async (para: any) => {
   if (!para?.id || retranslatingId.value) return
   try {
     await ElMessageBox.confirm(
-      `将对第 ${para.paragraph_index + 1} 段重新执行 AI 四步翻译，并覆盖该段现有译文。是否继续？`,
+      `将对第 ${para.paragraph_index + 1} 段重新执行 AI 五步翻译（含本地化），并覆盖该段现有译文。是否继续？`,
       'AI 重译',
       { type: 'warning', confirmButtonText: '重译', cancelButtonText: '取消' }
     )
@@ -481,7 +481,7 @@ const retranslateParagraph = async (para: any) => {
     const res = await literaryApi.retranslateParagraph(para.id)
     const data = res.data
     Object.assign(para, data)
-    para.editedText = data.user_edited_text || data.step4_finalization || data.translated_text || data.step3_revision || data.step2_verification || data.step1_translation || ''
+    para.editedText = data.user_edited_text || data.step5_localization || data.step4_finalization || data.translated_text || data.step3_revision || data.step2_verification || data.step1_translation || ''
     para.dirty = false
     if (compareMode.value === 'full') await loadFullText()
     ElMessage.success(`第 ${para.paragraph_index + 1} 段重译完成`)
@@ -557,9 +557,9 @@ const startLocalize = async () => {
   if (!id.value || localizing.value) return
   try {
     await ElMessageBox.confirm(
-      `将把当前定稿整体改写成更贴近${targetLangName()}的文章：保留原意、事实和段落，去掉翻译腔，并统一成这篇自己的说法。当前译文会被覆盖。`,
-      '一键本地化',
-      { type: 'warning', confirmButtonText: '开始本地化', cancelButtonText: '取消' }
+      `将从定稿重新执行第五步本地化：改写成更贴近${targetLangName()}的表达，去掉翻译腔。现有本地化结果会被覆盖。`,
+      '重新本地化',
+      { type: 'warning', confirmButtonText: '开始', cancelButtonText: '取消' }
     )
   } catch {
     return

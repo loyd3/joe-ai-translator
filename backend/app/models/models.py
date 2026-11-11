@@ -53,6 +53,7 @@ class LiteraryTranslationStatus(str, enum.Enum):
     VERIFYING = "verifying"       # 校验中
     REVISING = "revising"         # 修改中
     FINALIZING = "finalizing"     # 定稿中
+    LOCALIZING = "localizing"     # 本地化中
     COMPLETED = "completed"       # 已完成
     FAILED = "failed"             # 失败
 
@@ -66,14 +67,15 @@ class LiteraryTranslation(Base):
     group_name = Column(String(200), nullable=True, index=True, comment="用户自定义分组，空=未分组")
     source_text = Column(Text, nullable=False, comment="原文")
     
-    # 四步翻译结果
+    # 五步翻译结果
     step1_translation = Column(Text, nullable=True, comment="第一步：初译")
     step2_verification = Column(Text, nullable=True, comment="第二步：校验")
     step3_revision = Column(Text, nullable=True, comment="第三步：修改")
     step4_finalization = Column(Text, nullable=True, comment="第四步：定稿")
+    step5_localization = Column(Text, nullable=True, comment="第五步：本地化")
     
     # 当前步骤和状态
-    current_step = Column(Integer, default=1, comment="当前步骤 1-4")
+    current_step = Column(Integer, default=1, comment="当前步骤 1-5")
     status = Column(String(20), default=LiteraryTranslationStatus.PENDING, comment="任务状态")
     
     # 语言和配置
@@ -94,6 +96,9 @@ class LiteraryTranslation(Base):
     
     # 参考文档关联
     reference_document_ids = Column(JSON, default=list, comment="关联的参考文档ID列表")
+
+    # 外部专业词典绑定（任务级快照；创建时按领域默认自动填充，可改）
+    domain_dictionary_ids = Column(JSON, default=list, comment="关联的专业词典ID列表")
     
     # 用户翻译前指明的需求（风格、术语等）
     user_requirements = Column(Text, nullable=True, comment="用户翻译需求说明")
@@ -127,11 +132,12 @@ class LiteraryParagraph(Base):
     source_text = Column(Text, nullable=False, comment="原文段落")
     translated_text = Column(Text, nullable=True, comment="译文段落")
     
-    # 四步结果
+    # 五步结果
     step1_translation = Column(Text, nullable=True)
     step2_verification = Column(Text, nullable=True)
     step3_revision = Column(Text, nullable=True)
     step4_finalization = Column(Text, nullable=True)
+    step5_localization = Column(Text, nullable=True)
     
     # 用户编辑
     user_edited_text = Column(Text, nullable=True, comment="用户编辑的译文")
@@ -189,11 +195,72 @@ class ReferenceDocument(Base):
 
 
 # ============================================================
-# 专业词库功能
+# 外部专业词典（上传导入，与经验词库分离）
+# ============================================================
+
+class DomainDictionary(Base):
+    """外部专业词典包"""
+    __tablename__ = "domain_dictionaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False, comment="词典名称")
+    description = Column(Text, nullable=True, comment="说明")
+    literary_type = Column(String(50), nullable=True, comment="领域类型；空或 general=通用")
+    source_lang = Column(String(10), nullable=False, comment="源语言")
+    target_lang = Column(String(10), nullable=False, comment="目标语言")
+    source = Column(String(32), default="upload", comment="upload|manual")
+    is_active = Column(Boolean, default=True, comment="是否启用")
+    is_default_for_domain = Column(
+        Boolean, default=False, comment="同领域+语言对新建任务时是否默认挂载"
+    )
+    term_count = Column(Integer, default=0, comment="词条数")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    terms = relationship(
+        "DomainDictionaryTerm",
+        back_populates="dictionary",
+        cascade="all, delete-orphan",
+    )
+
+
+class DomainDictionaryTerm(Base):
+    """专业词典词条"""
+    __tablename__ = "domain_dictionary_terms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    dictionary_id = Column(
+        Integer,
+        ForeignKey("domain_dictionaries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_term = Column(String(500), nullable=False, comment="源语言词汇")
+    target_term = Column(String(500), nullable=False, comment="目标语言译名")
+    aliases = Column(JSON, nullable=True, comment="异写/缩写列表")
+    category = Column(String(100), nullable=True, comment="分类")
+    description = Column(Text, nullable=True, comment="备注")
+    priority = Column(Integer, default=0, comment="同词典内优先级，越大越优先")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    dictionary = relationship("DomainDictionary", back_populates="terms")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dictionary_id",
+            "source_term",
+            name="uq_domain_dict_term_source",
+        ),
+    )
+
+
+# ============================================================
+# 经验词库功能（从小/大词库沉淀，与外部专业词典分离）
 # ============================================================
 
 class ProfessionalTerm(Base):
-    """专业词汇库"""
+    """经验词汇库（翻译沉淀 / 手工维护）"""
     __tablename__ = "professional_terms"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -281,6 +348,9 @@ class AIConfig(Base):
     draft_base_url = Column(String(500), nullable=True, comment="本地草稿模型地址")
     draft_fallback = Column(Boolean, nullable=True, default=True, comment="本地失败时是否回退线上模型")
     draft_think = Column(Boolean, nullable=True, default=False, comment="本地模型是否开启思考")
+    term_hit_table_max_entries = Column(
+        Integer, nullable=True, default=40, comment="术语命中表每段上限（默认40，范围10-200）"
+    )
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

@@ -219,9 +219,9 @@ const namedGroups = computed(() => groupOptions.value.filter((g) => g.name))
 const getTypeName = (type: string) => TYPE_LABELS[type] || type
 const isLiteraryType = (type: string) => LITERARY_TYPES.has(type || 'general')
 const getStatusType = (status: string) =>
-  ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
+  ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', localizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
 const getStatusText = (status: string) =>
-  ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+  ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿中', localizing: '本地化中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 
 const formatDate = (value?: string) => {
   if (!value) return '-'

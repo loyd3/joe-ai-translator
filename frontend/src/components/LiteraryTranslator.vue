@@ -146,7 +146,7 @@
           <div class="footer-right">
             <el-button type="primary" size="default" :loading="isTranslating" @click="startTranslation">
               <el-icon><Promotion /></el-icon>
-              开始翻译（自动执行四步）
+              开始翻译（自动执行五步）
             </el-button>
           </div>
         </div>
@@ -191,6 +191,7 @@
               <el-radio-button :label="2" :disabled="!step2Done">校验</el-radio-button>
               <el-radio-button :label="3" :disabled="!step3Done">润色</el-radio-button>
               <el-radio-button :label="4" :disabled="!step4Done">定稿</el-radio-button>
+              <el-radio-button :label="5" :disabled="!step5Done">本地化</el-radio-button>
             </el-radio-group>
           </div>
           <div class="footer-right">
@@ -370,6 +371,7 @@
             <el-option label="校验中" value="verifying" />
             <el-option label="润色中" value="revising" />
             <el-option label="定稿中" value="finalizing" />
+            <el-option label="本地化中" value="localizing" />
             <el-option label="已完成" value="completed" />
             <el-option label="失败" value="failed" />
           </el-select>
@@ -478,6 +480,7 @@ const hasTranslations = computed(() => currentTask.value?.step1_translation)
 const step2Done = computed(() => currentTask.value?.step2_verification)
 const step3Done = computed(() => currentTask.value?.step3_revision)
 const step4Done = computed(() => currentTask.value?.step4_finalization)
+const step5Done = computed(() => currentTask.value?.step5_localization)
 const isCompleted = computed(() => currentTask.value?.status === 'completed')
 
 const canProceedToNext = computed(() => {
@@ -486,7 +489,7 @@ const canProceedToNext = computed(() => {
 })
 
 const nextStepLabel = computed(() => {
-  const labels = ['', '执行校验', '执行润色', '执行定稿']
+  const labels = ['', '执行校验', '执行润色', '执行定稿', '执行本地化']
   return labels[currentStep.value] || ''
 })
 
@@ -606,6 +609,7 @@ const onFileSelect = async (opts: { file: File }) => {
     currentTask.value = (await literaryApi.getTranslation(id, true)).data
     currentStep.value = currentTask.value.current_step
     outputText.value = currentTask.value.final_translation ||
+      currentTask.value.step5_localization ||
       currentTask.value.step4_finalization ||
       currentTask.value.step3_revision ||
       currentTask.value.step2_verification ||
@@ -626,6 +630,7 @@ const refreshTask = async () => {
     const response = await literaryApi.getTranslation(currentTask.value.id, true)
     currentTask.value = response.data
     outputText.value = currentTask.value.final_translation ||
+                       currentTask.value.step5_localization ||
                        currentTask.value.step4_finalization ||
                        currentTask.value.step3_revision ||
                        currentTask.value.step2_verification ||
@@ -654,7 +659,7 @@ const startComponentPolling = () => {
         isTranslating.value = false
         isProcessing.value = false
         if (data.overall_status === 'completed') {
-          ElMessage.success('四步流程已完成，可在线编辑或导出')
+          ElMessage.success('五步流程已完成，可在线编辑或导出')
         } else {
           ElMessage.error('翻译流程失败')
         }
@@ -673,7 +678,7 @@ const stopComponentPolling = () => {
 }
 
 const isWorkflowRunning = computed(() =>
-  ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
+  ['translating', 'verifying', 'revising', 'finalizing', 'localizing'].includes(currentTask.value?.status)
 )
 
 const stopComponentWorkflow = async () => {
@@ -840,6 +845,7 @@ const getStatusType = (status: string) => {
     verifying: 'warning',
     revising: 'warning',
     finalizing: 'warning',
+    localizing: 'warning',
     completed: 'success',
     failed: 'danger'
   }
@@ -853,6 +859,7 @@ const getStatusText = (status: string) => {
     verifying: '校验中',
     revising: '润色中',
     finalizing: '定稿中',
+    localizing: '本地化中',
     completed: '已完成',
     failed: '失败'
   }

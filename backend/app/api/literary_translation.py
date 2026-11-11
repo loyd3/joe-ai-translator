@@ -1,6 +1,6 @@
 """
 文学翻译 API 路由
-支持全文翻译、四步翻译流程、RAG参考、对照编辑
+支持全文翻译、五步翻译流程、RAG参考、对照编辑
 """
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query, Body
@@ -59,6 +59,12 @@ from app.services.story_profile import (
     save_profile,
 )
 from app.services.style_agent_service import StyleAgentService
+from app.services.term_hit_service import (
+    build_term_hit_table,
+    build_term_hit_table_for_texts,
+    merge_guidance_with_term_hits,
+    resolve_default_dictionary_ids,
+)
 
 router = APIRouter(prefix="/api/literary", tags=["literary-translation"])
 
@@ -81,6 +87,38 @@ def build_prompt_guidance(
         if story:
             parts.append(story)
     return "\n\n".join(parts)
+
+
+def build_step_guidance(
+    translation: LiteraryTranslation,
+    db: Session,
+    paragraph_text: str,
+    *,
+    include_story: bool = True,
+) -> str:
+    """风格/故事档案 + 术语命中表（命中表置顶，四步共用）。"""
+    base = build_prompt_guidance(translation, db, include_story=include_story)
+    term_table = build_term_hit_table(db, translation, paragraph_text or "")
+    return merge_guidance_with_term_hits(base, term_table)
+
+
+def _resolve_domain_dictionary_ids(
+    db: Session,
+    *,
+    literary_type: str,
+    source_lang: str,
+    target_lang: str,
+    explicit_ids: Optional[List[int]],
+) -> List[int]:
+    """显式传入（含空列表）则用传入值；未传则按领域默认自动挂。"""
+    if explicit_ids is not None:
+        return [int(x) for x in explicit_ids if x is not None]
+    return resolve_default_dictionary_ids(
+        db,
+        literary_type=literary_type,
+        source_lang=source_lang,
+        target_lang=target_lang,
+    )
 
 
 def _validate_style_agent_id(db: Session, style_agent_id: Optional[int]) -> None:
@@ -133,7 +171,9 @@ def _detect_resume_step(paragraphs: list) -> int:
         return 3
     if any(not _para_has_text(getattr(p, "step4_finalization", None)) for p in paragraphs):
         return 4
-    return 4
+    if any(not _para_has_text(getattr(p, "step5_localization", None)) for p in paragraphs):
+        return 5
+    return 5
 
 
 def _clear_paragraph_translations(paragraphs: list) -> None:
@@ -143,6 +183,7 @@ def _clear_paragraph_translations(paragraphs: list) -> None:
         para.step2_verification = None
         para.step3_revision = None
         para.step4_finalization = None
+        para.step5_localization = None
         para.translated_text = None
         para.user_edited_text = None
         para.is_edited = False
@@ -458,14 +499,25 @@ async def create_literary_translation(
 ):
     """创建文学翻译任务（大文本自动智能分段）"""
     _validate_style_agent_id(db, request.style_agent_id)
+    lit_type = request.literary_type.value if hasattr(request.literary_type, 'value') else request.literary_type
+    fields_set = getattr(request, "model_fields_set", None) or set()
+    explicit_dict_ids = request.domain_dictionary_ids if "domain_dictionary_ids" in fields_set else None
+    domain_ids = _resolve_domain_dictionary_ids(
+        db,
+        literary_type=lit_type,
+        source_lang=request.source_lang,
+        target_lang=request.target_lang,
+        explicit_ids=explicit_dict_ids,
+    )
     translation = LiteraryTranslation(
         title=request.title,
         group_name=_normalize_group_name(request.group_name),
         source_text=request.source_text,
         source_lang=request.source_lang,
         target_lang=request.target_lang,
-        literary_type=request.literary_type.value if hasattr(request.literary_type, 'value') else request.literary_type,
+        literary_type=lit_type,
         reference_document_ids=request.reference_document_ids or [],
+        domain_dictionary_ids=domain_ids,
         user_requirements=request.user_requirements,
         style_agent_id=request.style_agent_id,
         collab_mode=_resolve_task_collab_mode(request.collab_mode),
@@ -760,6 +812,7 @@ _HEAVY_TEXT_COLUMNS = (
     LiteraryTranslation.step2_verification,
     LiteraryTranslation.step3_revision,
     LiteraryTranslation.step4_finalization,
+    LiteraryTranslation.step5_localization,
     LiteraryTranslation.final_translation,
 )
 
@@ -794,14 +847,21 @@ async def get_literary_translation(
             "has_step2": bool(translation.step2_verification),
             "has_step3": bool(translation.step3_revision),
             "has_step4": bool(translation.step4_finalization),
+            "has_step5": bool(getattr(translation, "step5_localization", None)),
         }
     else:
         row = db.query(
             LiteraryTranslation.step2_verification.isnot(None),
             LiteraryTranslation.step3_revision.isnot(None),
             LiteraryTranslation.step4_finalization.isnot(None),
+            LiteraryTranslation.step5_localization.isnot(None),
         ).filter(LiteraryTranslation.id == translation_id).one()
-        flags = {"has_step2": bool(row[0]), "has_step3": bool(row[1]), "has_step4": bool(row[2])}
+        flags = {
+            "has_step2": bool(row[0]),
+            "has_step3": bool(row[1]),
+            "has_step4": bool(row[2]),
+            "has_step5": bool(row[3]),
+        }
 
     return LiteraryTranslationResponse(
         id=translation.id,
@@ -812,6 +872,7 @@ async def get_literary_translation(
         step2_verification=translation.step2_verification if include_source else None,
         step3_revision=translation.step3_revision if include_source else None,
         step4_finalization=translation.step4_finalization if include_source else None,
+        step5_localization=getattr(translation, "step5_localization", None) if include_source else None,
         final_translation=translation.final_translation if include_source else None,
         current_step=translation.current_step or 1,
         status=translation.status,
@@ -825,6 +886,7 @@ async def get_literary_translation(
         ai_provider=translation.ai_provider,
         ai_model=translation.ai_model,
         reference_document_ids=translation.reference_document_ids or [],
+        domain_dictionary_ids=list(getattr(translation, "domain_dictionary_ids", None) or []),
         user_requirements=translation.user_requirements,
         style_agent_id=getattr(translation, "style_agent_id", None),
         created_at=translation.created_at,
@@ -835,6 +897,7 @@ async def get_literary_translation(
         has_step2=flags["has_step2"],
         has_step3=flags["has_step3"],
         has_step4=flags["has_step4"],
+        has_step5=flags["has_step5"],
         paragraph_total=paragraph_total,
     )
 
@@ -864,7 +927,10 @@ async def update_literary_translation(
     if request.final_translation is not None:
         translation.final_translation = request.final_translation
     if request.status is not None:
-        allowed = ("pending", "translating", "verifying", "revising", "finalizing", "completed", "failed")
+        allowed = (
+            "pending", "translating", "verifying", "revising",
+            "finalizing", "localizing", "completed", "failed",
+        )
         if request.status not in allowed:
             raise HTTPException(status_code=400, detail=f"status must be one of: {allowed}")
         translation.status = request.status
@@ -878,6 +944,9 @@ async def update_literary_translation(
         if not literary_type:
             raise HTTPException(status_code=400, detail="翻译类型不能为空")
         translation.literary_type = literary_type
+    if "domain_dictionary_ids" in fields_set:
+        ids = request.domain_dictionary_ids if request.domain_dictionary_ids is not None else []
+        translation.domain_dictionary_ids = [int(x) for x in ids if x is not None]
 
     db.commit()
     db.refresh(translation)
@@ -935,7 +1004,9 @@ async def _execute_step1(translation_id: int, db: Session) -> None:
             continue
         source_text = _sanitize_text_for_api(para.source_text or "")
         ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
-        guidance = build_prompt_guidance(translation, db, include_story=story_mode)
+        guidance = build_step_guidance(
+            translation, db, source_text, include_story=story_mode
+        )
         neighbor = neighbor_note(paragraphs, index) if story_mode else ""
         result = await call_for_step(
             1,
@@ -976,7 +1047,6 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
     ).order_by(LiteraryParagraph.paragraph_index).all()
     full_step2 = []
     total_sound, total_word, total_meaning = 0, 0, 0
-    guidance = build_prompt_guidance(translation, db, include_story=True)
     for para in paragraphs:
         _ensure_workflow_active(translation_id)
         if _para_has_text(para.step2_verification):
@@ -989,6 +1059,9 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
                 para.translated_text = verified
                 db.commit()
             continue
+        guidance = build_step_guidance(
+            translation, db, para.source_text or "", include_story=True
+        )
         result = await call_for_step(
             2,
             lambda c, p=para, guide=guidance: c.literary_verify(
@@ -1029,7 +1102,6 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
         LiteraryParagraph.translation_id == translation_id
     ).order_by(LiteraryParagraph.paragraph_index).all()
     full_step3 = []
-    guidance = build_prompt_guidance(translation, db, include_story=True)
     for para in paragraphs:
         _ensure_workflow_active(translation_id)
         if _para_has_text(para.step3_revision):
@@ -1044,6 +1116,9 @@ async def _execute_step3(translation_id: int, db: Session) -> None:
             "beauty_word_score": para.beauty_word_score,
             "beauty_meaning_score": para.beauty_meaning_score,
         }
+        guidance = build_step_guidance(
+            translation, db, para.source_text or "", include_story=True
+        )
         result = await call_for_step(
             3,
             lambda c, p=para, analysis=verification_analysis, guide=guidance: c.literary_revise(
@@ -1086,7 +1161,12 @@ async def _finalize_paragraph_batch(
     ]
     batch_source = _pack_marked_paragraphs([p.source_text or "" for p in batch])
     batch_revised = _pack_marked_paragraphs(fallback_texts)
-    guidance = build_prompt_guidance(translation, db, include_story=True) or None
+    # 与 step1-3 同裁决：逐段命中后并集，避免整批拼接导致截断不一致
+    term_table = build_term_hit_table_for_texts(
+        db, translation, [p.source_text or "" for p in batch]
+    )
+    base = build_prompt_guidance(translation, db, include_story=True)
+    guidance = merge_guidance_with_term_hits(base, term_table) or None
     result = await call_for_step(
         4,
         lambda c, src=batch_source, revised=batch_revised, guide=guidance, count=len(batch): c.literary_finalize(
@@ -1145,15 +1225,77 @@ async def _execute_step4(translation_id: int, db: Session) -> None:
     )
     translation.step4_finalization = finalized_all
     translation.final_translation = finalized_all
-    translation.current_step = 4
-    translation.status = LiteraryTranslationStatus.COMPLETED
-    from datetime import datetime
-    translation.completed_at = datetime.now()
+    translation.current_step = 5
+    translation.status = LiteraryTranslationStatus.LOCALIZING
     db.commit()
+    # 术语从定稿抽取（本地化前），保证译名忠实于术语表
     try:
         await auto_extract_terms_after_finalize(translation_id, db)
     except Exception as e:
         print(f"[Auto Extract Terms] Error: {e}")
+
+
+async def _execute_step5(translation_id: int, db: Session) -> None:
+    """执行第五步：本地化 — 把定稿改写成更贴近目标语言的表达。"""
+    translation = db.query(LiteraryTranslation).filter(LiteraryTranslation.id == translation_id).first()
+    if not translation or translation.current_step < 5:
+        raise HTTPException(status_code=400, detail="Please complete step 4 first")
+    translation.status = LiteraryTranslationStatus.LOCALIZING
+    db.commit()
+
+    paragraphs = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation_id
+    ).order_by(LiteraryParagraph.paragraph_index).all()
+    if not paragraphs:
+        raise HTTPException(status_code=400, detail="没有可本地化的段落")
+
+    pending = [p for p in paragraphs if not _para_has_text(getattr(p, "step5_localization", None))]
+    if pending:
+        guidance = _localize_guidance(translation, db)
+        # 术语命中表：对整批定稿原文做并集注入
+        term_table = build_term_hit_table_for_texts(
+            db, translation, [p.source_text or "" for p in pending]
+        )
+        guidance = merge_guidance_with_term_hits(guidance, term_table)
+        batches = _localize_batches(pending)
+
+        voice = ""
+        if len(batches) > 1:
+            _ensure_workflow_active(translation_id)
+            excerpt = _sanitize_text_for_api(_localize_excerpt(pending))
+            if excerpt:
+                try:
+                    voice = await call_for_step(
+                        5,
+                        lambda c, sample=excerpt, guide=guidance: c.literary_localize_voice(
+                            sample,
+                            translation.source_lang,
+                            translation.target_lang,
+                            translation.literary_type,
+                            guidance=guide or None,
+                        ),
+                    )
+                    if not isinstance(voice, str):
+                        voice = ""
+                except Exception as exc:
+                    print(f"[Step5 Localize] voice brief failed, continue without it: {exc}")
+                    voice = ""
+
+        for batch in batches:
+            _ensure_workflow_active(translation_id)
+            await _localize_batch_with_retry(translation, batch, db, voice, guidance)
+
+    paragraphs = db.query(LiteraryParagraph).filter(
+        LiteraryParagraph.translation_id == translation_id
+    ).order_by(LiteraryParagraph.paragraph_index).all()
+    localized_all = PARA_SEP.join(_paragraph_current_text(p) for p in paragraphs)
+    translation.step5_localization = localized_all
+    translation.final_translation = localized_all
+    translation.current_step = 5
+    translation.status = LiteraryTranslationStatus.COMPLETED
+    from datetime import datetime
+    translation.completed_at = datetime.now()
+    db.commit()
 
 
 def _format_error_debug(exc: BaseException, step: int, step_name: str) -> str:
@@ -1171,13 +1313,14 @@ def _format_error_debug(exc: BaseException, step: int, step_name: str) -> str:
 
 
 async def _run_workflow_background(translation_id: int, generation: int):
-    """后台依次执行四步翻译流程：初译 → 校验 → 修改 → 定稿"""
+    """后台依次执行五步翻译流程：初译 → 校验 → 修改 → 定稿 → 本地化"""
     db = SessionLocal()
     steps = [
         (1, "初译", _execute_step1),
         (2, "校验", _execute_step2),
         (3, "修改", _execute_step3),
         (4, "定稿", _execute_step4),
+        (5, "本地化", _execute_step5),
     ]
     mode_token = None
     gen_token = _current_workflow_generation.set(generation)
@@ -1274,6 +1417,7 @@ async def start_batch_workflow(
         LiteraryTranslationStatus.VERIFYING,
         LiteraryTranslationStatus.REVISING,
         LiteraryTranslationStatus.FINALIZING,
+        LiteraryTranslationStatus.LOCALIZING,
     }
 
     valid_ids = []
@@ -1305,7 +1449,7 @@ async def start_translation_workflow(
     request: WorkflowStartRequest = Body(default_factory=WorkflowStartRequest),
     db: Session = Depends(get_db)
 ):
-    """启动四步翻译流程（后台执行：初译 → 校验 → 修改 → 定稿），立即返回，前端轮询状态"""
+    """启动五步翻译流程（后台执行：初译 → 校验 → 修改 → 定稿 → 本地化），立即返回，前端轮询状态"""
     translation = db.query(LiteraryTranslation).filter(
         LiteraryTranslation.id == translation_id
     ).first()
@@ -1336,6 +1480,7 @@ async def start_translation_workflow(
         2: LiteraryTranslationStatus.VERIFYING,
         3: LiteraryTranslationStatus.REVISING,
         4: LiteraryTranslationStatus.FINALIZING,
+        5: LiteraryTranslationStatus.LOCALIZING,
     }
     translation.current_step = resume_step
     translation.status = status_by_step.get(resume_step, LiteraryTranslationStatus.TRANSLATING)
@@ -1352,7 +1497,11 @@ async def start_translation_workflow(
         "\n\n".join(p.step3_revision or "" for p in paragraphs if _para_has_text(p.step3_revision))
         if resume_step > 3 else None
     )
-    translation.step4_finalization = None
+    translation.step4_finalization = (
+        "\n\n".join(p.step4_finalization or "" for p in paragraphs if _para_has_text(p.step4_finalization))
+        if resume_step > 4 else None
+    )
+    translation.step5_localization = None
     translation.final_translation = None
     translation.completed_at = None
     translation.error_message = None
@@ -1383,6 +1532,7 @@ async def stop_translation_workflow(
         LiteraryTranslationStatus.VERIFYING,
         LiteraryTranslationStatus.REVISING,
         LiteraryTranslationStatus.FINALIZING,
+        LiteraryTranslationStatus.LOCALIZING,
     }
     if translation.status not in running_statuses:
         return {"message": "当前未在运行", "status": translation.status}
@@ -1413,6 +1563,7 @@ async def _run_batch_workflow_background(translation_ids: list):
                 2: LiteraryTranslationStatus.VERIFYING,
                 3: LiteraryTranslationStatus.REVISING,
                 4: LiteraryTranslationStatus.FINALIZING,
+                5: LiteraryTranslationStatus.LOCALIZING,
             }
             translation.current_step = resume_step
             translation.status = status_by_step.get(resume_step, LiteraryTranslationStatus.TRANSLATING)
@@ -1420,6 +1571,7 @@ async def _run_batch_workflow_background(translation_ids: list):
             translation.step2_verification = None
             translation.step3_revision = None
             translation.step4_finalization = None
+            translation.step5_localization = None
             translation.final_translation = None
             translation.completed_at = None
             translation.error_message = None
@@ -1525,7 +1677,8 @@ async def get_workflow_status(
         raise HTTPException(status_code=404, detail="Translation not found")
 
     status_to_running_step = {
-        "translating": 1, "verifying": 2, "revising": 3, "finalizing": 4,
+        "translating": 1, "verifying": 2, "revising": 3,
+        "finalizing": 4, "localizing": 5,
     }
     running_step = status_to_running_step.get(translation.status, 0)
 
@@ -1534,6 +1687,7 @@ async def get_workflow_status(
         (2, "校验", translation.step2_verification),
         (3, "修改", translation.step3_revision),
         (4, "定稿", translation.step4_finalization),
+        (5, "本地化", getattr(translation, "step5_localization", None)),
     ]
 
     steps = []
@@ -1556,7 +1710,13 @@ async def get_workflow_status(
             LiteraryParagraph.translation_id == translation_id
         ).all()
         para_total = len(all_paras)
-        step_field_map = {1: "step1_translation", 2: "step2_verification", 3: "step3_revision", 4: "step4_finalization"}
+        step_field_map = {
+            1: "step1_translation",
+            2: "step2_verification",
+            3: "step3_revision",
+            4: "step4_finalization",
+            5: "step5_localization",
+        }
         field = step_field_map.get(running_step)
         if field:
             para_done = sum(1 for p in all_paras if getattr(p, field, None))
@@ -1644,7 +1804,7 @@ async def retranslate_paragraph(
     request: RetranslateParagraphRequest = Body(default_factory=RetranslateParagraphRequest),
     db: Session = Depends(get_db),
 ):
-    """对单个段落重新跑完整四步翻译（初译→校验→润色→定稿）"""
+    """对单个段落重新跑完整五步翻译（初译→校验→润色→定稿→本地化）"""
     paragraph = db.query(LiteraryParagraph).filter(
         LiteraryParagraph.id == paragraph_id
     ).first()
@@ -1669,7 +1829,9 @@ async def retranslate_paragraph(
     reference_content = get_reference_and_requirements(translation, db)
     ref_safe = _sanitize_text_for_api(reference_content) if reference_content else ""
     story_mode = is_story_type(translation.literary_type)
-    guidance = build_prompt_guidance(translation, db, include_story=story_mode)
+    guidance = build_step_guidance(
+        translation, db, source_text, include_story=story_mode
+    )
     extra = (request.extra_requirements or "").strip() if request else ""
     if extra:
         extra_block = f"## 本次重译要求\n{extra}"
@@ -1711,11 +1873,20 @@ async def retranslate_paragraph(
             ),
         )
         step4 = step4_result.get("final_translation", step3)
+        step5_result = await call_for_step(
+            5,
+            lambda c: c.literary_localize(
+                source_text, step4, translation.source_lang, translation.target_lang,
+                translation.literary_type, guidance=guidance or None,
+            ),
+        )
+        step5 = step5_result.get("localized_translation", step4)
         result = {
             "step1_translation": step1,
             "step2_verification": step2,
             "step3_revision": step3,
             "step4_finalization": step4,
+            "step5_localization": step5,
             "beauty_scores": {
                 "sound": step2_result.get("beauty_sound_score", 7.0),
                 "word": step2_result.get("beauty_word_score", 7.0),
@@ -1731,7 +1902,8 @@ async def retranslate_paragraph(
     paragraph.step2_verification = result["step2_verification"]
     paragraph.step3_revision = result["step3_revision"]
     paragraph.step4_finalization = result["step4_finalization"]
-    paragraph.translated_text = result["step4_finalization"]
+    paragraph.step5_localization = result["step5_localization"]
+    paragraph.translated_text = result["step5_localization"]
     paragraph.user_edited_text = None
     paragraph.is_edited = False
     beauty_scores = result.get("beauty_scores") or {}
@@ -1748,8 +1920,11 @@ async def retranslate_paragraph(
     translation.step2_verification = "\n\n".join(p.step2_verification or "" for p in all_paras)
     translation.step3_revision = "\n\n".join(p.step3_revision or "" for p in all_paras)
     translation.step4_finalization = "\n\n".join(p.step4_finalization or "" for p in all_paras)
+    translation.step5_localization = "\n\n".join(
+        getattr(p, "step5_localization", None) or "" for p in all_paras
+    )
     translation.final_translation = "\n\n".join(
-        p.user_edited_text or p.translated_text or "" for p in all_paras
+        _paragraph_current_text(p) for p in all_paras
     )
     scored = [p for p in all_paras if p.beauty_sound_score is not None]
     if scored:
@@ -1761,10 +1936,21 @@ async def retranslate_paragraph(
     return paragraph
 
 
+def _paragraph_localize_source(paragraph) -> str:
+    """本地化输入：以定稿为准，避免对已本地化文本再次改写。"""
+    return (
+        paragraph.step4_finalization
+        or paragraph.step3_revision
+        or paragraph.translated_text
+        or ""
+    )
+
+
 def _paragraph_current_text(paragraph) -> str:
-    """当前展示用的定稿：用户改过的优先，否则用定稿。"""
+    """当前展示用译文：用户改过的优先，否则本地化，再否则定稿。"""
     return (
         paragraph.user_edited_text
+        or getattr(paragraph, "step5_localization", None)
         or paragraph.step4_finalization
         or paragraph.translated_text
         or paragraph.step3_revision
@@ -1773,8 +1959,8 @@ def _paragraph_current_text(paragraph) -> str:
 
 
 def _localize_excerpt(paragraphs: list, limit: int = 1600) -> str:
-    """长文取开头、中段、结尾，供提炼统一文风。"""
-    texts = [( _paragraph_current_text(p) or "" ).strip() for p in paragraphs]
+    """长文取开头、中段、结尾，供提炼统一文风（基于定稿）。"""
+    texts = [(_paragraph_localize_source(p) or "").strip() for p in paragraphs]
     texts = [t for t in texts if t]
     if not texts:
         return ""
@@ -1800,7 +1986,7 @@ def _localize_batches(paragraphs: list) -> list:
     current: list = []
     current_size = 0
     for para in paragraphs:
-        size = len(_paragraph_current_text(para) or "")
+        size = len(_paragraph_localize_source(para) or "")
         if current and current_size + size > LOCALIZE_BATCH_CHARS:
             batches.append(current)
             current = [para]
@@ -1818,17 +2004,16 @@ def _apply_localized_parts(paragraphs: list, localized_parts: List[str], fallbac
         cleaned = AIClient._strip_translation_wrappers(text or "")
         if not cleaned.strip():
             cleaned = (fallback or "").strip()
-        para.user_edited_text = cleaned
+        para.step5_localization = cleaned
         para.translated_text = cleaned
-        para.is_edited = True
 
 
 async def _localize_paragraph_batch(translation, batch: list, db: Session, voice: str, guidance: str) -> None:
-    fallback_texts = [_paragraph_current_text(p) for p in batch]
+    fallback_texts = [_paragraph_localize_source(p) for p in batch]
     batch_source = _pack_marked_paragraphs([p.source_text or "" for p in batch])
     batch_draft = _pack_marked_paragraphs(fallback_texts)
     result = await call_for_step(
-        4,
+        5,
         lambda c, src=batch_source, draft=batch_draft, guide=guidance, tone=voice, count=len(batch): c.literary_localize(
             src,
             draft,
@@ -1869,7 +2054,7 @@ def _localize_guidance(translation: LiteraryTranslation, db: Session) -> str:
 
 
 async def _run_localize_background(translation_id: int) -> None:
-    """把已定稿译文整篇改写成更贴近目标语言的表达。"""
+    """手动重新本地化：从定稿再跑第五步，覆盖 step5。"""
     db = SessionLocal()
     job = LOCALIZE_JOBS[translation_id]
     mode_token = None
@@ -1882,11 +2067,22 @@ async def _run_localize_background(translation_id: int) -> None:
         paragraphs = db.query(LiteraryParagraph).filter(
             LiteraryParagraph.translation_id == translation_id
         ).order_by(LiteraryParagraph.paragraph_index).all()
-        if not paragraphs or not any(_paragraph_current_text(p).strip() for p in paragraphs):
+        if not paragraphs or not any(_paragraph_localize_source(p).strip() for p in paragraphs):
             raise RuntimeError("还没有可本地化的定稿")
+
+        # 清空旧本地化结果后重跑
+        for p in paragraphs:
+            p.step5_localization = None
+        translation.status = LiteraryTranslationStatus.LOCALIZING
+        translation.current_step = 5
+        db.commit()
 
         mode_token = push_collab_mode(getattr(translation, "collab_mode", None))
         guidance = _localize_guidance(translation, db)
+        term_table = build_term_hit_table_for_texts(
+            db, translation, [p.source_text or "" for p in paragraphs]
+        )
+        guidance = merge_guidance_with_term_hits(guidance, term_table)
         batches = _localize_batches(paragraphs)
         job["total"] = len(batches)
         job["done"] = 0
@@ -1898,7 +2094,7 @@ async def _run_localize_background(translation_id: int) -> None:
             if excerpt:
                 try:
                     voice = await call_for_step(
-                        4,
+                        5,
                         lambda c, sample=excerpt, guide=guidance: c.literary_localize_voice(
                             sample,
                             translation.source_lang,
@@ -1921,9 +2117,12 @@ async def _run_localize_background(translation_id: int) -> None:
         paragraphs = db.query(LiteraryParagraph).filter(
             LiteraryParagraph.translation_id == translation_id
         ).order_by(LiteraryParagraph.paragraph_index).all()
-        translation.final_translation = PARA_SEP.join(
-            _paragraph_current_text(p) for p in paragraphs
-        )
+        localized_all = PARA_SEP.join(_paragraph_current_text(p) for p in paragraphs)
+        translation.step5_localization = localized_all
+        translation.final_translation = localized_all
+        translation.status = LiteraryTranslationStatus.COMPLETED
+        from datetime import datetime
+        translation.completed_at = datetime.now()
         db.commit()
         job["status"] = "done"
         job["message"] = "本地化完成"
@@ -1956,7 +2155,7 @@ async def start_localize(
     translation_id: int,
     db: Session = Depends(get_db),
 ):
-    """一键本地化：把定稿整体改写成更贴近目标语言的文章。"""
+    """手动重新本地化（工作流第五步的独立重跑入口）。"""
     existing = LOCALIZE_JOBS.get(translation_id)
     if existing and existing.get("status") == "running":
         return _localize_job_payload(translation_id)
@@ -1972,15 +2171,15 @@ async def start_localize(
         LiteraryTranslationStatus.VERIFYING,
         LiteraryTranslationStatus.REVISING,
         LiteraryTranslationStatus.FINALIZING,
+        LiteraryTranslationStatus.LOCALIZING,
     }
     if translation.status in running_statuses:
-        raise HTTPException(status_code=400, detail="翻译仍在进行，完成定稿后再本地化")
+        raise HTTPException(status_code=400, detail="翻译仍在进行，请稍后再本地化")
 
     has_text = db.query(LiteraryParagraph.id).filter(
         LiteraryParagraph.translation_id == translation_id,
         (
-            (LiteraryParagraph.user_edited_text.isnot(None) & (LiteraryParagraph.user_edited_text != ""))
-            | (LiteraryParagraph.step4_finalization.isnot(None) & (LiteraryParagraph.step4_finalization != ""))
+            (LiteraryParagraph.step4_finalization.isnot(None) & (LiteraryParagraph.step4_finalization != ""))
             | (LiteraryParagraph.translated_text.isnot(None) & (LiteraryParagraph.translated_text != ""))
         ),
     ).first()
@@ -3257,6 +3456,13 @@ async def upload_and_translate_file(
         raise HTTPException(status_code=400, detail="文件内容为空")
     ref_ids = json.loads(reference_document_ids) if reference_document_ids else []
     _validate_style_agent_id(db, style_agent_id)
+    domain_ids = _resolve_domain_dictionary_ids(
+        db,
+        literary_type=literary_type,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        explicit_ids=None,
+    )
     translation = LiteraryTranslation(
         title=title or file.filename,
         source_text=text_content,
@@ -3264,6 +3470,7 @@ async def upload_and_translate_file(
         target_lang=target_lang,
         literary_type=literary_type,
         reference_document_ids=ref_ids,
+        domain_dictionary_ids=domain_ids,
         user_requirements=user_requirements.strip() if user_requirements else None,
         style_agent_id=style_agent_id,
         collab_mode=_resolve_task_collab_mode(collab_mode),
@@ -3367,6 +3574,13 @@ async def upload_and_translate_batch(
             })
             continue
 
+        domain_ids = _resolve_domain_dictionary_ids(
+            db,
+            literary_type=literary_type,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            explicit_ids=None,
+        )
         translation = LiteraryTranslation(
             title=file.filename,
             source_text=text_content,
@@ -3374,6 +3588,7 @@ async def upload_and_translate_batch(
             target_lang=target_lang,
             literary_type=literary_type,
             reference_document_ids=ref_ids,
+            domain_dictionary_ids=domain_ids,
             user_requirements=req_text,
             style_agent_id=style_agent_id,
             collab_mode=task_mode,
@@ -3441,7 +3656,6 @@ async def translate_all_chunks(
     db.commit()
 
     reference_content = get_reference_and_requirements(translation, db)
-    guidance = build_prompt_guidance(translation, db, include_story=True)
     ref_safe = reference_content if reference_content else None
 
     # 批量翻译所有段落
@@ -3453,18 +3667,21 @@ async def translate_all_chunks(
         for idx, para in enumerate(paragraphs):
             try:
                 text = para.source_text or ""
+                guidance = build_step_guidance(
+                    translation, db, text, include_story=True
+                )
                 step1 = await call_for_step(
                     1,
-                    lambda c, src=text: c.literary_translate(
+                    lambda c, src=text, guide=guidance: c.literary_translate(
                         src, translation.source_lang, translation.target_lang,
-                        translation.literary_type, ref_safe, guidance=guidance or None,
+                        translation.literary_type, ref_safe, guidance=guide or None,
                     ),
                 )
                 step2_result = await call_for_step(
                     2,
-                    lambda c, src=text, draft=step1: c.literary_verify(
+                    lambda c, src=text, draft=step1, guide=guidance: c.literary_verify(
                         src, draft, translation.source_lang, translation.target_lang,
-                        translation.literary_type, guidance=guidance or None,
+                        translation.literary_type, guidance=guide or None,
                     ),
                 )
                 step2 = step2_result.get("verified_translation", step1)
@@ -3483,19 +3700,30 @@ async def translate_all_chunks(
                         translation.literary_type, guidance=guidance or None,
                     ),
                 )
+                step4 = step4_result.get("final_translation", step3)
+                step5_result = await call_for_step(
+                    5,
+                    lambda c, src=text, draft=step4, guide=guidance: c.literary_localize(
+                        src, draft, translation.source_lang, translation.target_lang,
+                        translation.literary_type, guidance=guide or None,
+                    ),
+                )
+                step5 = step5_result.get("localized_translation", step4)
                 result = {
                     "step1_translation": step1,
                     "step2_verification": step2,
                     "step3_revision": step3,
-                    "step4_finalization": step4_result.get("final_translation", step3),
+                    "step4_finalization": step4,
+                    "step5_localization": step5,
                 }
 
-                # 保存四步翻译结果
+                # 保存五步翻译结果
                 para.step1_translation = result["step1_translation"]
                 para.step2_verification = result["step2_verification"]
                 para.step3_revision = result["step3_revision"]
                 para.step4_finalization = result["step4_finalization"]
-                para.translated_text = result["step4_finalization"]
+                para.step5_localization = result["step5_localization"]
+                para.translated_text = result["step5_localization"]
 
                 # 保存三美评分
                 beauty_scores = result.get("beauty_scores", {})
@@ -3520,14 +3748,18 @@ async def translate_all_chunks(
         full_step2 = "\n\n".join([p.step2_verification or "" for p in paragraphs if p.step2_verification])
         full_step3 = "\n\n".join([p.step3_revision or "" for p in paragraphs if p.step3_revision])
         full_step4 = "\n\n".join([p.step4_finalization or "" for p in paragraphs if p.step4_finalization])
+        full_step5 = "\n\n".join(
+            [getattr(p, "step5_localization", None) or "" for p in paragraphs if getattr(p, "step5_localization", None)]
+        )
 
         translation.step1_translation = full_step1
         translation.step2_verification = full_step2
         translation.step3_revision = full_step3
         translation.step4_finalization = full_step4
-        translation.final_translation = full_step4
+        translation.step5_localization = full_step5
+        translation.final_translation = full_step5 or full_step4
         translation.status = LiteraryTranslationStatus.COMPLETED
-        translation.current_step = 4
+        translation.current_step = 5
 
         from datetime import datetime
         translation.completed_at = datetime.now()

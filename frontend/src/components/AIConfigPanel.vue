@@ -225,6 +225,16 @@
           <div class="form-hint">仅作为新建/开始时的预选项，每次翻译仍可改。</div>
         </el-form-item>
 
+        <el-form-item label="术语命中表每段上限">
+          <el-input-number
+            v-model="form.term_hit_table_max_entries"
+            :min="10"
+            :max="200"
+            :step="5"
+          />
+          <div class="form-hint">专业词典与经验词库按段命中后写入四步 prompt；默认 40，超限按优先级截断。</div>
+        </el-form-item>
+
         <div class="actions">
           <el-button :loading="testing" @click="testConnection">测试线上连接</el-button>
           <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
@@ -311,6 +321,7 @@ const form = ref({
   draft_base_url: 'http://localhost:11434/v1',
   draft_fallback: true,
   draft_think: false,
+  term_hit_table_max_entries: 40,
 })
 
 const currentProviderMeta = computed(() =>
@@ -378,6 +389,7 @@ async function load() {
       draft_base_url: data.draft_base_url || 'http://localhost:11434/v1',
       draft_fallback: data.draft_fallback !== false,
       draft_think: data.draft_think === true,
+      term_hit_table_max_entries: data.term_hit_table_max_entries ?? 40,
     }
     if (!form.value.model) {
       form.value.model = currentProviderMeta.value?.default_model || ''
@@ -473,6 +485,7 @@ async function save() {
       draft_base_url: form.value.draft_base_url || undefined,
       draft_fallback: form.value.draft_fallback,
       draft_think: form.value.draft_think,
+      term_hit_table_max_entries: form.value.term_hit_table_max_entries ?? 40,
     }
     if (form.value.api_key) payload.api_key = form.value.api_key
     if (form.value.draft_api_key) payload.draft_api_key = form.value.draft_api_key

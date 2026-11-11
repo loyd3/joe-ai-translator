@@ -155,6 +155,7 @@ export const systemApi = {
     draft_base_url?: string
     draft_fallback?: boolean
     draft_think?: boolean
+    term_hit_table_max_entries?: number
   }) => api.put('/system/ai-config', data),
   testAIConfig: (data: {
     provider: string
@@ -219,6 +220,7 @@ export const literaryApi = {
     target_lang: string
     literary_type: 'poetry' | 'prose' | 'novel' | 'drama' | 'general' | string
     reference_document_ids?: number[]
+    domain_dictionary_ids?: number[]
     user_requirements?: string
     style_agent_id?: number
     collab_mode?: 'online' | 'local' | 'collab' | string
@@ -283,6 +285,7 @@ export const literaryApi = {
     style_agent_id?: number | null
     user_requirements?: string
     literary_type?: string
+    domain_dictionary_ids?: number[]
   }) => api.put(`/literary/translations/${id}`, data),
   
   // 删除翻译任务
@@ -436,6 +439,65 @@ export const literaryApi = {
 }
 
 // ========== 文风智能体 API（系统级） ==========
+// ========== 外部专业词典 ==========
+export const domainDictionaryApi = {
+  list: (params?: {
+    literary_type?: string
+    source_lang?: string
+    target_lang?: string
+    is_active?: boolean
+    keyword?: string
+  }) => api.get('/domain-dictionaries', { params }),
+
+  defaults: (params: { literary_type: string; source_lang: string; target_lang: string }) =>
+    api.get<{ ids: number[] }>('/domain-dictionaries/defaults', { params }),
+
+  get: (id: number) => api.get(`/domain-dictionaries/${id}`),
+
+  create: (data: {
+    name: string
+    description?: string
+    literary_type?: string | null
+    source_lang: string
+    target_lang: string
+    is_default_for_domain?: boolean
+    is_active?: boolean
+  }) => api.post('/domain-dictionaries', data),
+
+  update: (id: number, data: Record<string, unknown>) =>
+    api.put(`/domain-dictionaries/${id}`, data),
+
+  remove: (id: number) => api.delete(`/domain-dictionaries/${id}`),
+
+  listTerms: (id: number, params?: { keyword?: string; skip?: number; limit?: number }) =>
+    api.get(`/domain-dictionaries/${id}/terms`, { params }),
+
+  createTerm: (id: number, data: {
+    source_term: string
+    target_term: string
+    aliases?: string[]
+    category?: string
+    description?: string
+    priority?: number
+  }) => api.post(`/domain-dictionaries/${id}/terms`, data),
+
+  updateTerm: (id: number, termId: number, data: Record<string, unknown>) =>
+    api.put(`/domain-dictionaries/${id}/terms/${termId}`, data),
+
+  deleteTerm: (id: number, termId: number) =>
+    api.delete(`/domain-dictionaries/${id}/terms/${termId}`),
+
+  importFile: (id: number, file: File, onDuplicate: 'skip' | 'overwrite' = 'skip') => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('on_duplicate', onDuplicate)
+    return api.post(`/domain-dictionaries/${id}/import`, form, {
+      timeout: 180000,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+}
+
 export const styleAgentApi = {
   listPresets: () => api.get<StyleAgentPreset[]>('/style-agent-presets'),
   list: () => api.get<StyleAgent[]>('/style-agents'),

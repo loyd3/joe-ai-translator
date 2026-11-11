@@ -125,32 +125,46 @@
       </div>
 
       <div class="sidebar-footer-row">
-        <div class="sidebar-footer" :class="{ active: panelMode === 'documents' }" @click="goToDocuments">
-          <el-icon><FolderOpened /></el-icon>
-          <span>文档库</span>
-        </div>
-        <div class="sidebar-footer" @click="openThemeSettings">
-          <el-icon><Sunny /></el-icon>
-          <span>主题设置</span>
-        </div>
-        <div class="sidebar-footer" @click="goToGlobalDictionary">
-          <el-icon><Collection /></el-icon>
-          <span>大词典</span>
-        </div>
-        <div class="sidebar-footer" @click="goToStylePage">
-          <el-icon><Brush /></el-icon>
-          <span>文风设定</span>
-        </div>
-        <div class="sidebar-footer ai-config-entry" @click="goToAIConfigPage">
-          <el-icon><Setting /></el-icon>
-          <div class="ai-config-meta">
-            <span>大模型配置</span>
-            <!-- <div v-if="aiConfigSummary" class="ai-config-tags">
-              <el-tag size="small" type="success" effect="plain" round>本 {{ aiConfigSummary.local }}</el-tag>
-              <el-tag size="small" type="info" effect="plain" round>线 {{ aiConfigSummary.online }}</el-tag>
-            </div> -->
+        <el-dropdown
+          trigger="click"
+          placement="top-start"
+          popper-class="sidebar-config-popper"
+          @command="onSidebarConfigCommand"
+        >
+          <div class="sidebar-footer sidebar-config-trigger" :class="{ active: isConfigPanelActive }">
+            <el-icon><Setting /></el-icon>
+            <span>配置</span>
+            <el-icon class="trigger-caret"><ArrowUp /></el-icon>
           </div>
-        </div>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="documents" :class="{ 'is-active-item': panelMode === 'documents' }">
+                <el-icon><FolderOpened /></el-icon>
+                <span>文档库</span>
+              </el-dropdown-item>
+              <el-dropdown-item command="theme">
+                <el-icon><Sunny /></el-icon>
+                <span>主题设置</span>
+              </el-dropdown-item>
+              <el-dropdown-item command="terms" :class="{ 'is-active-item': panelMode === 'terms' && termLibrarySystem }">
+                <el-icon><Collection /></el-icon>
+                <span>大词典</span>
+              </el-dropdown-item>
+              <el-dropdown-item command="domain-dicts" :class="{ 'is-active-item': panelMode === 'domain-dicts' }">
+                <el-icon><Notebook /></el-icon>
+                <span>专业词典</span>
+              </el-dropdown-item>
+              <el-dropdown-item command="style" :class="{ 'is-active-item': panelMode === 'style' }">
+                <el-icon><Brush /></el-icon>
+                <span>文风设定</span>
+              </el-dropdown-item>
+              <el-dropdown-item command="ai-config" :class="{ 'is-active-item': panelMode === 'ai-config' }">
+                <el-icon><Setting /></el-icon>
+                <span>大模型配置</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </div>
 
@@ -163,6 +177,10 @@
         :literary-type="termLibrarySystem ? undefined : currentTask?.literary_type"
         :source-lang="termLibrarySystem ? undefined : currentTask?.source_lang"
         :target-lang="termLibrarySystem ? undefined : currentTask?.target_lang"
+        @back="closePanel"
+      />
+      <DomainDictionaryView
+        v-else-if="panelMode === 'domain-dicts'"
         @back="closePanel"
       />
       <DocumentLibraryView
@@ -585,6 +603,26 @@
           />
           <p class="form-hint">先贴合原文风格，再叠加所选译者习惯（如多用成语、短句）。</p>
         </el-form-item>
+        <el-form-item label="专业词典">
+          <el-select
+            v-model="newTaskForm.domain_dictionary_ids"
+            multiple
+            clearable
+            filterable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="按领域自动推荐，可增删"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="d in createDictOptions"
+              :key="d.id"
+              :label="`${d.name}（${d.term_count || 0}）`"
+              :value="d.id"
+            />
+          </el-select>
+          <p class="form-hint">默认挂载当前领域+语言对的专业词典；可改。优先级高于经验词库。</p>
+        </el-form-item>
         <el-form-item label="翻译需求（选填）">
           <el-input v-model="newTaskForm.user_requirements" type="textarea" :rows="2" placeholder="如：偏书面语、保留专有名词原文、统一某术语译法等" maxlength="500" show-word-limit />
         </el-form-item>
@@ -594,7 +632,7 @@
             <el-radio-button label="local">全部本地</el-radio-button>
             <el-radio-button label="collab">混合</el-radio-button>
           </el-radio-group>
-          <p class="form-hint">混合：本地预译，线上校验/修改/定稿。开始翻译时仍可再改。</p>
+          <p class="form-hint">混合：本地预译，线上校验/修改/定稿/本地化。开始翻译时仍可再改。</p>
         </el-form-item>
         <el-form-item label="原文">
           <el-upload
@@ -622,7 +660,7 @@
       </el-form>
       <template #footer>
         <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" @click="submitNewTask" :loading="creating">创建</el-button>
+        <el-button type="primary" @click="submitNewTask" :loading="creating" :disabled="createDictsLoading">创建</el-button>
       </template>
     </el-dialog>
 
@@ -764,9 +802,10 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, inject, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Upload, Document, Plus, List, Setting, Collection, Memo, Brush, VideoPlay, VideoPause, DArrowRight, Trophy, Grid, DocumentCopy, View, Select, Sunny, RefreshRight, FolderOpened } from '@element-plus/icons-vue'
-import { literaryApi, translateApi, systemApi } from '@/api'
+import { Edit, Delete, Upload, Document, Plus, List, Setting, Collection, Memo, Brush, VideoPlay, VideoPause, DArrowRight, Trophy, Grid, DocumentCopy, View, Select, Sunny, RefreshRight, FolderOpened, Notebook, ArrowUp } from '@element-plus/icons-vue'
+import { literaryApi, translateApi, systemApi, domainDictionaryApi } from '@/api'
 import TermLibraryView from '@/views/TermLibraryView.vue'
+import DomainDictionaryView from '@/views/DomainDictionaryView.vue'
 import DocumentLibraryView from '@/views/DocumentLibraryView.vue'
 import StoryStructurePanel from '@/components/StoryStructurePanel.vue'
 import StyleAgentsView from '@/views/StyleAgentsView.vue'
@@ -797,7 +836,11 @@ const selectedParagraphId = ref<number | null>(null)
 const rightMode = ref<'read' | 'bulk'>('read')
 const miniEditId = ref<number | null>(null)
 const retranslatingId = ref<number | null>(null)
-const panelMode = ref<'workspace' | 'terms' | 'story' | 'style' | 'ai-config' | 'result' | 'documents'>('workspace')
+const panelMode = ref<'workspace' | 'terms' | 'domain-dicts' | 'story' | 'style' | 'ai-config' | 'result' | 'documents'>('workspace')
+const createDictOptions = ref<any[]>([])
+const createDictsReady = ref(false)
+const createDictsLoading = ref(false)
+let createDictRefreshSeq = 0
 const stylePickerReloadToken = ref(0)
 const fullSource = ref('')
 const fullTranslation = ref('')
@@ -973,6 +1016,7 @@ const newTaskForm = ref({
   source_lang: 'en',
   target_lang: 'zh',
   literary_type: 'general' as string,
+  domain_dictionary_ids: [] as number[],
   user_requirements: '',
   style_agent_id: undefined as number | undefined,
   collab_mode: 'online' as 'online' | 'local' | 'collab',
@@ -1002,7 +1046,7 @@ const currentStep = computed(() => {
 })
 
 const isWorkflowRunning = computed(() =>
-  ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
+  ['translating', 'verifying', 'revising', 'finalizing', 'localizing'].includes(currentTask.value?.status)
 )
 
 const canResumeWorkflow = computed(() => {
@@ -1043,8 +1087,10 @@ const paraProgress = ref<{ total: number; done: number }>({ total: 0, done: 0 })
 const workflowLoading = ref(false)
 
 const stepItems = computed(() => {
-  const labels = ['翻译', '校验', '润色', '定稿']
-  const statusMap: Record<string, number> = { translating: 0, verifying: 1, revising: 2, finalizing: 3 }
+  const labels = ['翻译', '校验', '润色', '定稿', '本地化']
+  const statusMap: Record<string, number> = {
+    translating: 0, verifying: 1, revising: 2, finalizing: 3, localizing: 4,
+  }
   const active = currentStep.value
   const runningIdx = statusMap[currentTask.value?.status] ?? -1
 
@@ -1075,8 +1121,44 @@ const goToGlobalDictionary = () => {
   panelMode.value = 'terms'
 }
 
+const goToDomainDictionaries = () => {
+  panelMode.value = 'domain-dicts'
+}
+
 const goToDocuments = () => {
   panelMode.value = 'documents'
+}
+
+async function refreshCreateDictOptions() {
+  const seq = ++createDictRefreshSeq
+  createDictsLoading.value = true
+  createDictsReady.value = false
+  try {
+    const [listRes, defRes] = await Promise.all([
+      domainDictionaryApi.list({
+        literary_type: newTaskForm.value.literary_type,
+        source_lang: newTaskForm.value.source_lang,
+        target_lang: newTaskForm.value.target_lang,
+        is_active: true,
+      }),
+      domainDictionaryApi.defaults({
+        literary_type: newTaskForm.value.literary_type,
+        source_lang: newTaskForm.value.source_lang,
+        target_lang: newTaskForm.value.target_lang,
+      }),
+    ])
+    if (seq !== createDictRefreshSeq) return
+    createDictOptions.value = listRes.data || []
+    newTaskForm.value.domain_dictionary_ids = defRes.data?.ids || []
+    createDictsReady.value = true
+  } catch {
+    if (seq !== createDictRefreshSeq) return
+    createDictOptions.value = []
+    createDictsReady.value = false
+    ElMessage.error('专业词典加载失败')
+  } finally {
+    if (seq === createDictRefreshSeq) createDictsLoading.value = false
+  }
 }
 
 const openDocumentFromLibrary = async (task: any) => {
@@ -1100,6 +1182,33 @@ const goToStylePage = () => {
 
 const goToAIConfigPage = () => {
   panelMode.value = 'ai-config'
+}
+
+const isConfigPanelActive = computed(() =>
+  ['documents', 'terms', 'domain-dicts', 'style', 'ai-config'].includes(panelMode.value)
+)
+
+const onSidebarConfigCommand = (command: string) => {
+  switch (command) {
+    case 'documents':
+      goToDocuments()
+      break
+    case 'theme':
+      openThemeSettings()
+      break
+    case 'terms':
+      goToGlobalDictionary()
+      break
+    case 'domain-dicts':
+      goToDomainDictionaries()
+      break
+    case 'style':
+      goToStylePage()
+      break
+    case 'ai-config':
+      goToAIConfigPage()
+      break
+  }
 }
 
 const openStyleFromCreate = () => {
@@ -1288,6 +1397,7 @@ const openTaskFromQuery = async () => {
 
 const paragraphDisplayText = (p: any) =>
   p.user_edited_text ||
+  p.step5_localization ||
   p.translated_text ||
   p.step4_finalization ||
   p.step3_revision ||
@@ -1404,7 +1514,7 @@ const selectTask = async (task: any, options?: { keepPage?: boolean; silent?: bo
   }
 }
 
-const createNewTask = () => {
+const createNewTask = async () => {
   const defaultType = categoryGroup.value === 'professional' ? 'tech' : 'general'
   const defaultGroup = selectedGroup.value && selectedGroup.value !== '__ungrouped__' ? selectedGroup.value : ''
   newTaskForm.value = {
@@ -1414,12 +1524,26 @@ const createNewTask = () => {
     source_lang: 'en',
     target_lang: 'zh',
     literary_type: defaultType,
+    domain_dictionary_ids: [],
     user_requirements: '',
     style_agent_id: undefined,
     collab_mode: defaultCollabMode(),
   }
   showCreateDialog.value = true
+  await refreshCreateDictOptions()
 }
+
+watch(
+  () => [
+    newTaskForm.value.literary_type,
+    newTaskForm.value.source_lang,
+    newTaskForm.value.target_lang,
+    showCreateDialog.value,
+  ],
+  ([, , , open]) => {
+    if (open) refreshCreateDictOptions()
+  },
+)
 
 const allowedUploadExtensions = new Set(['txt', 'md', 'markdown', 'text', 'doc', 'docx', 'pdf', 'mobi', 'azw', 'azw3', 'html', 'htm', 'xml', 'json', 'csv', 'log', 'rst', 'tex', 'srt', 'sub', 'vtt', 'yaml', 'yml', 'ini', 'cfg', 'properties'])
 const onCreateFileSelect = async (opts: { raw: File }) => {
@@ -1457,6 +1581,10 @@ const submitNewTask = async () => {
     ElMessage.warning('请粘贴原文或上传文件')
     return
   }
+  if (createDictsLoading.value || !createDictsReady.value) {
+    ElMessage.warning('专业词典仍在加载，请稍候再创建')
+    return
+  }
   creating.value = true
   try {
     const payload = {
@@ -1466,6 +1594,7 @@ const submitNewTask = async () => {
       source_lang: newTaskForm.value.source_lang,
       target_lang: newTaskForm.value.target_lang,
       literary_type: newTaskForm.value.literary_type,
+      domain_dictionary_ids: newTaskForm.value.domain_dictionary_ids || [],
       user_requirements: newTaskForm.value.user_requirements?.trim() || undefined,
       style_agent_id: newTaskForm.value.style_agent_id,
       collab_mode: newTaskForm.value.collab_mode,
@@ -1537,7 +1666,8 @@ const confirmDeleteTask = async (task: any) => {
   }
 }
 
-const isTaskRunning = (status: string) => ['translating', 'verifying', 'revising', 'finalizing'].includes(status)
+const isTaskRunning = (status: string) =>
+  ['translating', 'verifying', 'revising', 'finalizing', 'localizing'].includes(status)
 
 const enterBatchMode = async () => {
   batchMode.value = true
@@ -1760,7 +1890,7 @@ const saveParagraph = async (para: any) => {
 
 const applyRetranslatedParagraph = (para: any, data: any) => {
   Object.assign(para, data)
-  para.editedText = data.user_edited_text || data.step4_finalization || data.translated_text || data.step3_revision || data.step2_verification || data.step1_translation || ''
+  para.editedText = data.user_edited_text || data.step5_localization || data.step4_finalization || data.translated_text || data.step3_revision || data.step2_verification || data.step1_translation || ''
   para.dirty = false
 }
 
@@ -1841,8 +1971,8 @@ const exportTranslation = async () => {
   }
 }
 
-const getStatusType = (status: string) => ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
-const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
+const getStatusType = (status: string) => ({ pending: 'info', translating: 'warning', verifying: 'warning', revising: 'warning', finalizing: 'warning', localizing: 'warning', completed: 'success', failed: 'danger' } as Record<string, string>)[status] || 'info'
+const getStatusText = (status: string) => ({ pending: '待开始', translating: '翻译中', verifying: '校验中', revising: '润色中', finalizing: '定稿中', localizing: '本地化中', completed: '已完成', failed: '失败' } as Record<string, string>)[status] || status
 </script>
 
 <style scoped lang="scss">
@@ -2016,6 +2146,11 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   flex-shrink: 0;
   border-top: 1px solid var(--ins-line);
   background: transparent;
+
+  :deep(.el-dropdown) {
+    display: block;
+    width: 100%;
+  }
 }
 
 .sidebar-footer {
@@ -2028,6 +2163,7 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
   font-weight: 600;
   color: var(--ins-muted);
   transition: background 0.15s, color 0.15s;
+  outline: none;
   &:hover {
     background: rgba(var(--ins-primary-rgb), 0.06);
     color: var(--ins-ink);
@@ -2037,39 +2173,16 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
     color: var(--el-color-primary);
   }
   .el-icon { font-size: 16px; }
-  .el-tag { margin-left: auto; }
-  & + .sidebar-footer {
-    border-top: 1px solid var(--ins-line);
-  }
-
-  &.ai-config-entry {
-    align-items: flex-start;
-    .el-icon { margin-top: 2px; }
-  }
 }
 
-.ai-config-meta {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.sidebar-config-trigger {
+  width: 100%;
+  box-sizing: border-box;
 
-  > span { line-height: 1.3; }
-}
-
-.ai-config-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-
-  .el-tag {
-    margin-left: 0;
-    max-width: 100%;
-    height: auto;
-    white-space: normal;
-    line-height: 1.3;
-    padding: 2px 6px;
+  .trigger-caret {
+    margin-left: auto;
+    font-size: 12px;
+    opacity: 0.7;
   }
 }
 
@@ -2533,6 +2646,24 @@ const getStatusText = (status: string) => ({ pending: '待开始', translating: 
     justify-content: flex-end;
     gap: 8px;
     margin-top: 10px;
+  }
+}
+
+.sidebar-config-popper {
+  .el-dropdown-menu__item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+
+    .el-icon {
+      font-size: 15px;
+    }
+
+    &.is-active-item {
+      color: var(--el-color-primary);
+      background: rgba(var(--ins-primary-rgb), 0.08);
+    }
   }
 }
 </style>

@@ -369,6 +369,7 @@ const statusText = computed(() => ({
   verifying: '校验中',
   revising: '润色中',
   finalizing: '定稿中',
+  localizing: '本地化中',
   completed: '已完成',
   failed: '失败',
 } as Record<string, string>)[data.value?.status] || data.value?.status)
@@ -652,7 +653,7 @@ watch(() => props.translationId, () => {
 
 timer = setInterval(() => {
   if (editMode.value || regenerating.value) return
-  const running = ['translating', 'verifying', 'revising', 'finalizing'].includes(data.value?.status)
+  const running = ['translating', 'verifying', 'revising', 'finalizing', 'localizing'].includes(data.value?.status)
   if (running) load()
 }, 15000)
 

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import OperationalError
 
-from app.api import translate, system, literary_translation, style_agents
+from app.api import translate, system, literary_translation, style_agents, domain_dictionaries
 from app.database import engine, Base
 from app.models import models as _models  # noqa: F401  注册表结构
 import os
@@ -27,6 +27,8 @@ async def lifespan(app: FastAPI):
         _ensure_translation_collab_mode_column()
         _ensure_document_groups_table()
         _ensure_ai_config_columns()
+        _ensure_domain_dictionary_schema()
+        _ensure_step5_localization_schema()
         logger.info("Database tables ready.")
     except OperationalError as e:
         logger.warning(
@@ -168,6 +170,7 @@ def _ensure_ai_config_columns():
         "draft_base_url": ("VARCHAR(500) NULL", "VARCHAR(500)"),
         "draft_fallback": ("TINYINT(1) NULL", "INTEGER"),
         "draft_think": ("TINYINT(1) NULL", "INTEGER"),
+        "term_hit_table_max_entries": ("INT NULL", "INTEGER"),
     }
     try:
         inspector = inspect(engine)
@@ -184,6 +187,72 @@ def _ensure_ai_config_columns():
                 logger.info("Added ai_config.%s", name)
     except Exception as e:
         logger.warning("Could not ensure ai_config columns: %s", e)
+
+
+def _ensure_domain_dictionary_schema():
+    """确保专业词典表存在，并为翻译任务补上 domain_dictionary_ids。"""
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        for table_name in ("domain_dictionaries", "domain_dictionary_terms"):
+            if table_name not in tables and table_name in Base.metadata.tables:
+                Base.metadata.tables[table_name].create(bind=engine, checkfirst=True)
+                logger.info("Created %s table", table_name)
+        if "literary_translations" not in tables:
+            return
+        columns = {column["name"] for column in inspector.get_columns("literary_translations")}
+        if "domain_dictionary_ids" in columns:
+            return
+        if engine.dialect.name == "sqlite":
+            ddl = "ALTER TABLE literary_translations ADD COLUMN domain_dictionary_ids TEXT"
+        else:
+            ddl = "ALTER TABLE literary_translations ADD COLUMN domain_dictionary_ids JSON NULL COMMENT '关联的专业词典ID列表'"
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+        logger.info("Added literary_translations.domain_dictionary_ids")
+    except Exception as e:
+        logger.warning("Could not ensure domain dictionary schema: %s", e)
+
+
+def _ensure_step5_localization_schema():
+    """为翻译任务与段落补上第五步本地化字段。"""
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        dialect = engine.dialect.name
+        with engine.begin() as conn:
+            if "literary_translations" in tables:
+                cols = {c["name"] for c in inspector.get_columns("literary_translations")}
+                if "step5_localization" not in cols:
+                    if dialect == "sqlite":
+                        conn.execute(text(
+                            "ALTER TABLE literary_translations ADD COLUMN step5_localization TEXT"
+                        ))
+                    else:
+                        conn.execute(text(
+                            "ALTER TABLE literary_translations ADD COLUMN step5_localization TEXT NULL "
+                            "COMMENT '第五步：本地化' AFTER step4_finalization"
+                        ))
+                    logger.info("Added literary_translations.step5_localization")
+            if "literary_paragraphs" in tables:
+                # refresh inspector after possible alter
+                inspector = inspect(engine)
+                cols = {c["name"] for c in inspector.get_columns("literary_paragraphs")}
+                if "step5_localization" not in cols:
+                    if dialect == "sqlite":
+                        conn.execute(text(
+                            "ALTER TABLE literary_paragraphs ADD COLUMN step5_localization TEXT"
+                        ))
+                    else:
+                        conn.execute(text(
+                            "ALTER TABLE literary_paragraphs ADD COLUMN step5_localization TEXT NULL "
+                            "AFTER step4_finalization"
+                        ))
+                    logger.info("Added literary_paragraphs.step5_localization")
+    except Exception as e:
+        logger.warning("Could not ensure step5 localization schema: %s", e)
 
 
 # 创建 FastAPI 应用
@@ -221,6 +290,7 @@ app.include_router(translate.router)
 app.include_router(system.router)
 app.include_router(literary_translation.router)
 app.include_router(style_agents.router)
+app.include_router(domain_dictionaries.router)
 
 
 @app.get("/")

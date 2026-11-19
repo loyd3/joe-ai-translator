@@ -159,6 +159,19 @@ def _para_has_text(value: Optional[str]) -> bool:
     return bool((value or "").strip())
 
 
+def _as_beauty_score(value, default: float = 7.0) -> float:
+    """评分缺失或为 null 时用默认分。dict.get 在键存在且值为 null 时不会回退。"""
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return default
+    if score != score:
+        return default
+    return score
+
+
 def _detect_resume_step(paragraphs: list) -> int:
     """根据段落已有结果决定从哪一步续跑：有译文保留，从未完成处继续。"""
     if not paragraphs:
@@ -1052,9 +1065,9 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
         if _para_has_text(para.step2_verification):
             verified = para.step2_verification
             full_step2.append(verified)
-            total_sound += para.beauty_sound_score or 7.0
-            total_word += para.beauty_word_score or 7.0
-            total_meaning += para.beauty_meaning_score or 7.0
+            total_sound += _as_beauty_score(para.beauty_sound_score)
+            total_word += _as_beauty_score(para.beauty_word_score)
+            total_meaning += _as_beauty_score(para.beauty_meaning_score)
             if not _para_has_text(para.translated_text):
                 para.translated_text = verified
                 db.commit()
@@ -1075,9 +1088,9 @@ async def _execute_step2(translation_id: int, db: Session) -> None:
         )
         para.step2_verification = verified
         para.translated_text = verified
-        para.beauty_sound_score = result.get("beauty_sound_score", 7.0)
-        para.beauty_word_score = result.get("beauty_word_score", 7.0)
-        para.beauty_meaning_score = result.get("beauty_meaning_score", 7.0)
+        para.beauty_sound_score = _as_beauty_score(result.get("beauty_sound_score"))
+        para.beauty_word_score = _as_beauty_score(result.get("beauty_word_score"))
+        para.beauty_meaning_score = _as_beauty_score(result.get("beauty_meaning_score"))
         total_sound += para.beauty_sound_score
         total_word += para.beauty_word_score
         total_meaning += para.beauty_meaning_score
@@ -1888,9 +1901,9 @@ async def retranslate_paragraph(
             "step4_finalization": step4,
             "step5_localization": step5,
             "beauty_scores": {
-                "sound": step2_result.get("beauty_sound_score", 7.0),
-                "word": step2_result.get("beauty_word_score", 7.0),
-                "meaning": step2_result.get("beauty_meaning_score", 7.0),
+                "sound": _as_beauty_score(step2_result.get("beauty_sound_score")),
+                "word": _as_beauty_score(step2_result.get("beauty_word_score")),
+                "meaning": _as_beauty_score(step2_result.get("beauty_meaning_score")),
             },
         }
     except Exception as e:
@@ -1907,9 +1920,9 @@ async def retranslate_paragraph(
     paragraph.user_edited_text = None
     paragraph.is_edited = False
     beauty_scores = result.get("beauty_scores") or {}
-    paragraph.beauty_sound_score = beauty_scores.get("sound", 7.0)
-    paragraph.beauty_word_score = beauty_scores.get("word", 7.0)
-    paragraph.beauty_meaning_score = beauty_scores.get("meaning", 7.0)
+    paragraph.beauty_sound_score = _as_beauty_score(beauty_scores.get("sound"))
+    paragraph.beauty_word_score = _as_beauty_score(beauty_scores.get("word"))
+    paragraph.beauty_meaning_score = _as_beauty_score(beauty_scores.get("meaning"))
     db.commit()
 
     # 刷新全文聚合字段
@@ -3727,9 +3740,9 @@ async def translate_all_chunks(
 
                 # 保存三美评分
                 beauty_scores = result.get("beauty_scores", {})
-                para.beauty_sound_score = beauty_scores.get("sound", 7.0)
-                para.beauty_word_score = beauty_scores.get("word", 7.0)
-                para.beauty_meaning_score = beauty_scores.get("meaning", 7.0)
+                para.beauty_sound_score = _as_beauty_score(beauty_scores.get("sound"))
+                para.beauty_word_score = _as_beauty_score(beauty_scores.get("word"))
+                para.beauty_meaning_score = _as_beauty_score(beauty_scores.get("meaning"))
 
                 success_count += 1
 

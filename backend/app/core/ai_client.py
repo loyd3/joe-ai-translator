@@ -665,6 +665,19 @@ Output only the translated text, no additional comments."""
         r"译文结束",
     )
 
+    @staticmethod
+    def _as_beauty_score(value, default: float = 7.0) -> float:
+        """评分缺失或为 null 时用默认分。dict.get 在键存在且值为 null 时不会回退。"""
+        if isinstance(value, bool) or value is None:
+            return default
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return default
+        if score != score:
+            return default
+        return score
+
     @classmethod
     def _strip_translation_wrappers(cls, text: str) -> str:
         """去掉提示标记/说明外壳，但保留段落空行与 <<<PARA_N>>> 分段标记。"""
@@ -1503,9 +1516,9 @@ Output only the translated text, no additional comments."""
             "step3_revision": step3,
             "step4_finalization": step4,
             "beauty_scores": {
-                "sound": step2_result.get("beauty_sound_score", 7.0),
-                "word": step2_result.get("beauty_word_score", 7.0),
-                "meaning": step2_result.get("beauty_meaning_score", 7.0),
+                "sound": self._as_beauty_score(step2_result.get("beauty_sound_score")),
+                "word": self._as_beauty_score(step2_result.get("beauty_word_score")),
+                "meaning": self._as_beauty_score(step2_result.get("beauty_meaning_score")),
             },
             "final_assessment": step4_result.get("final_assessment", ""),
             "translator_note": step4_result.get("translator_note", ""),

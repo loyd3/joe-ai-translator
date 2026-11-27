@@ -146,7 +146,7 @@
           <div class="footer-right">
             <el-button type="primary" size="default" :loading="isTranslating" @click="startTranslation">
               <el-icon><Promotion /></el-icon>
-              开始翻译（自动执行五步）
+              开始翻译（自动执行四步）
             </el-button>
           </div>
         </div>
@@ -191,7 +191,6 @@
               <el-radio-button :label="2" :disabled="!step2Done">校验</el-radio-button>
               <el-radio-button :label="3" :disabled="!step3Done">润色</el-radio-button>
               <el-radio-button :label="4" :disabled="!step4Done">定稿</el-radio-button>
-              <el-radio-button :label="5" :disabled="!step5Done">本地化</el-radio-button>
             </el-radio-group>
           </div>
           <div class="footer-right">
@@ -480,7 +479,6 @@ const hasTranslations = computed(() => currentTask.value?.step1_translation)
 const step2Done = computed(() => currentTask.value?.step2_verification)
 const step3Done = computed(() => currentTask.value?.step3_revision)
 const step4Done = computed(() => currentTask.value?.step4_finalization)
-const step5Done = computed(() => currentTask.value?.step5_localization)
 const isCompleted = computed(() => currentTask.value?.status === 'completed')
 
 const canProceedToNext = computed(() => {
@@ -489,7 +487,7 @@ const canProceedToNext = computed(() => {
 })
 
 const nextStepLabel = computed(() => {
-  const labels = ['', '执行校验', '执行润色', '执行定稿', '执行本地化']
+  const labels = ['', '执行校验', '执行润色', '执行定稿']
   return labels[currentStep.value] || ''
 })
 
@@ -659,7 +657,7 @@ const startComponentPolling = () => {
         isTranslating.value = false
         isProcessing.value = false
         if (data.overall_status === 'completed') {
-          ElMessage.success('五步流程已完成，可在线编辑或导出')
+          ElMessage.success('翻译流程已完成，可在线编辑或导出')
         } else {
           ElMessage.error('翻译流程失败')
         }
@@ -678,7 +676,7 @@ const stopComponentPolling = () => {
 }
 
 const isWorkflowRunning = computed(() =>
-  ['translating', 'verifying', 'revising', 'finalizing', 'localizing'].includes(currentTask.value?.status)
+  ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
 )
 
 const stopComponentWorkflow = async () => {

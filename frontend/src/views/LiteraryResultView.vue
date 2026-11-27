@@ -13,7 +13,7 @@
       </div>
       <div class="header-actions">
         
-        <el-tooltip content="工作流第五步：从定稿重新本地化（覆盖现有本地化结果）" placement="bottom">
+        <el-tooltip content="可选：从定稿本地化（覆盖现有本地化结果）" placement="bottom">
           <el-button :loading="localizing" :disabled="saving" @click="startLocalize">
             <el-icon v-if="!localizing"><MagicStick /></el-icon>
             {{ localizeLabel }}
@@ -269,7 +269,7 @@ const id = computed(() => {
 })
 
 const localizeLabel = computed(() => {
-  if (!localizing.value) return '重新本地化'
+  if (!localizing.value) return '本地化'
   const { done, total, message } = localizeProgress.value
   if (total > 0) return `本地化 ${done}/${total}`
   return message || '本地化中'
@@ -469,7 +469,7 @@ const retranslateParagraph = async (para: any) => {
   if (!para?.id || retranslatingId.value) return
   try {
     await ElMessageBox.confirm(
-      `将对第 ${para.paragraph_index + 1} 段重新执行 AI 五步翻译（含本地化），并覆盖该段现有译文。是否继续？`,
+      `将对第 ${para.paragraph_index + 1} 段重新执行 AI 四步翻译（初译→校验→润色→定稿），并覆盖该段现有译文。是否继续？`,
       'AI 重译',
       { type: 'warning', confirmButtonText: '重译', cancelButtonText: '取消' }
     )
@@ -557,8 +557,8 @@ const startLocalize = async () => {
   if (!id.value || localizing.value) return
   try {
     await ElMessageBox.confirm(
-      `将从定稿重新执行第五步本地化：改写成更贴近${targetLangName()}的表达，去掉翻译腔。现有本地化结果会被覆盖。`,
-      '重新本地化',
+      `可选本地化：从定稿改写成更贴近${targetLangName()}的表达，去掉翻译腔。现有本地化结果会被覆盖。`,
+      '本地化',
       { type: 'warning', confirmButtonText: '开始', cancelButtonText: '取消' }
     )
   } catch {

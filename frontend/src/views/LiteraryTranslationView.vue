@@ -206,7 +206,7 @@
       <LiteraryResultView
         v-else-if="panelMode === 'result' && currentTask?.id"
         :translation-id="currentTask.id"
-        @back="closePanel"
+        @back="() => closePanel({ refresh: true })"
       />
       <template v-else>
       <!-- 空状态 -->
@@ -283,6 +283,7 @@
                 </el-tooltip>
               </div>
               <el-tag v-if="isWorkflowRunning" type="warning" effect="plain" round>{{ getStatusText(currentTask.status) }}</el-tag>
+              <el-tag v-else-if="currentTask.status === 'localizing'" type="warning" effect="plain" round>本地化中</el-tag>
               <el-tag v-else-if="currentTask.status === 'completed'" type="success" effect="plain" round>已完成</el-tag>
               <el-tag v-if="workflowLoading" type="info" effect="plain" round>加载中</el-tag>
 
@@ -632,7 +633,7 @@
             <el-radio-button label="local">全部本地</el-radio-button>
             <el-radio-button label="collab">混合</el-radio-button>
           </el-radio-group>
-          <p class="form-hint">混合：本地预译，线上校验/修改/定稿/本地化。开始翻译时仍可再改。</p>
+          <p class="form-hint">混合：本地预译，线上校验/修改/定稿。开始翻译时仍可再改。本地化为定稿后的可选步骤。</p>
         </el-form-item>
         <el-form-item label="原文">
           <el-upload
@@ -1041,12 +1042,15 @@ const targetLanguages = computed(() => languages.value.filter(l => l.code !== 'a
 const currentStep = computed(() => {
   const task = currentTask.value
   if (!task) return 0
-  if (task.status === 'completed') return 4
-  return Math.max(0, (task.current_step || 1) - 1)
+  // 主流程四步：0=翻译 … 3=定稿；已完成时点亮全部
+  if (task.status === 'completed') return 3
+  const step = Math.min(Math.max(task.current_step || 1, 1), 4)
+  return Math.max(0, step - 1)
 })
 
 const isWorkflowRunning = computed(() =>
-  ['translating', 'verifying', 'revising', 'finalizing', 'localizing'].includes(currentTask.value?.status)
+  // 本地化为可选步骤，不占用主流程「运行中」态，便于卡住的本地化任务可点继续收尾
+  ['translating', 'verifying', 'revising', 'finalizing'].includes(currentTask.value?.status)
 )
 
 const canResumeWorkflow = computed(() => {
@@ -1087,9 +1091,11 @@ const paraProgress = ref<{ total: number; done: number }>({ total: 0, done: 0 })
 const workflowLoading = ref(false)
 
 const stepItems = computed(() => {
-  const labels = ['翻译', '校验', '润色', '定稿', '本地化']
+  const labels = ['翻译', '校验', '润色', '定稿']
   const statusMap: Record<string, number> = {
-    translating: 0, verifying: 1, revising: 2, finalizing: 3, localizing: 4,
+    translating: 0, verifying: 1, revising: 2, finalizing: 3,
+    // 可选本地化：步骤条仍视为定稿已完成
+    localizing: 3,
   }
   const active = currentStep.value
   const runningIdx = statusMap[currentTask.value?.status] ?? -1
@@ -1097,8 +1103,8 @@ const stepItems = computed(() => {
   return labels.map((label, i) => {
     let state = 'pending'
     if (i < active) state = 'done'
-    else if (i === runningIdx) state = 'running'
-    else if (currentTask.value?.status === 'completed') state = 'done'
+    else if (i === runningIdx && currentTask.value?.status !== 'localizing') state = 'running'
+    else if (currentTask.value?.status === 'completed' || currentTask.value?.status === 'localizing') state = 'done'
     else if (currentTask.value?.status === 'failed' && i <= runningIdx) state = 'failed'
     return { label, state }
   })
@@ -1216,11 +1222,15 @@ const openStyleFromCreate = () => {
   panelMode.value = 'style'
 }
 
-const closePanel = () => {
+const closePanel = (options?: { refresh?: boolean }) => {
+  const leavingResult = panelMode.value === 'result'
   if (panelMode.value === 'style') {
     stylePickerReloadToken.value += 1
   }
   panelMode.value = 'workspace'
+  if (options?.refresh && leavingResult && currentTask.value) {
+    void refreshTask()
+  }
 }
 
 const hasBeautyScores = computed(() => currentTask.value?.beauty_sound_score != null)
@@ -1345,6 +1355,14 @@ const loadTasks = async (autoSelect = false) => {
     const response = await literaryApi.listTranslations(buildListParams())
     taskList.value = response.data.items || []
     taskTotal.value = response.data.total || 0
+    if (currentTask.value) {
+      const updated = taskList.value.find((t: any) => t.id === currentTask.value.id)
+      if (updated && updated.status !== currentTask.value.status) {
+        currentTask.value.status = updated.status
+        currentTask.value.current_step = updated.current_step
+        if (updated.status !== 'localizing') stopLocalizeWatch()
+      }
+    }
     if (autoSelect && taskList.value.length > 0 && !currentTask.value) {
       await selectTask(taskList.value[0])
     }
@@ -1486,15 +1504,77 @@ const setCompareMode = async (mode: 'segment' | 'full') => {
   await onCompareModeChange(mode)
 }
 
+const applyWorkflowStatus = (data?: { overall_status?: string; current_step?: number }) => {
+  if (!currentTask.value || !data?.overall_status) return
+  currentTask.value.status = data.overall_status
+  if (data.current_step != null) currentTask.value.current_step = data.current_step
+  const item = taskList.value.find((t: any) => t.id === currentTask.value.id)
+  if (item) {
+    item.status = data.overall_status
+    if (data.current_step != null) item.current_step = data.current_step
+  }
+}
+
+const syncListedTaskStatus = () => {
+  if (!currentTask.value) return
+  const item = taskList.value.find((t: any) => t.id === currentTask.value.id)
+  if (!item || item.status === currentTask.value.status) return
+  item.status = currentTask.value.status
+  item.current_step = currentTask.value.current_step
+}
+
+let localizeWatchTimer: ReturnType<typeof setInterval> | null = null
+
+const stopLocalizeWatch = () => {
+  if (localizeWatchTimer) {
+    clearInterval(localizeWatchTimer)
+    localizeWatchTimer = null
+  }
+}
+
+const watchLocalizingOnce = async () => {
+  if (!currentTask.value || currentTask.value.status !== 'localizing') {
+    stopLocalizeWatch()
+    return
+  }
+  try {
+    const wf = await literaryApi.getWorkflowStatus(currentTask.value.id)
+    if (!currentTask.value || !wf.data?.overall_status || wf.data.overall_status === 'localizing') return
+    applyWorkflowStatus(wf.data)
+    stopLocalizeWatch()
+    await loadParagraphPage(paragraphPage.value, true)
+    if (compareMode.value === 'full') await loadFullText()
+  } catch {
+    /* ignore */
+  }
+}
+
+const startLocalizeWatch = () => {
+  stopLocalizeWatch()
+  if (currentTask.value?.status !== 'localizing') return
+  localizeWatchTimer = setInterval(() => { void watchLocalizingOnce() }, 3000)
+}
+
 const selectTask = async (task: any, options?: { keepPage?: boolean; silent?: boolean }) => {
   const silent = options?.silent
   // 从词库 / 文风 / 大模型等子页点选任务时，关闭子页并回到该任务的翻译工作区
   if (!silent && panelMode.value !== 'workspace') closePanel()
   if (!silent) stopPolling()
+  if (!silent) stopLocalizeWatch()
   if (!silent) workflowLoading.value = true
   try {
     const response = await literaryApi.getTranslation(task.id, false, false)
     currentTask.value = response.data
+    syncListedTaskStatus()
+    // 卡在「本地化中」时，拉取 workflow 会按译文是否已齐收尾，并同步侧栏
+    if (currentTask.value?.status === 'localizing') {
+      try {
+        const wf = await literaryApi.getWorkflowStatus(task.id)
+        applyWorkflowStatus(wf.data)
+      } catch {
+        /* ignore */
+      }
+    }
     if (!options?.keepPage) {
       compareMode.value = 'segment'
       fullSource.value = ''
@@ -1507,6 +1587,7 @@ const selectTask = async (task: any, options?: { keepPage?: boolean; silent?: bo
     await loadParagraphPage(paragraphPage.value, !!silent)
     if (compareMode.value === 'full') await loadFullText()
     if (!silent && isWorkflowRunning.value) startPolling()
+    if (currentTask.value?.status === 'localizing') startLocalizeWatch()
   } catch (error) {
     ElMessage.error('加载任务失败')
   } finally {
@@ -1872,7 +1953,7 @@ const startBatchPolling = (expectCompletion = false) => {
 
 const stopBatchPolling = () => { if (batchPollTimer) { clearInterval(batchPollTimer); batchPollTimer = null } }
 
-onUnmounted(() => { stopPolling(); stopBatchPolling() })
+onUnmounted(() => { stopPolling(); stopBatchPolling(); stopLocalizeWatch() })
 
 const refreshTask = async () => {
   if (currentTask.value) await selectTask(currentTask.value, { keepPage: true, silent: true })
